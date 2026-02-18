@@ -87,22 +87,33 @@ def main():
             print(f"  Deg rates: {result['deg_rates']}")
             print(f"\n  Our #1: {result['our_best_strategy']['name']}")
             print(f"    Pits at laps: {result['our_best_strategy']['pit_laps']}")
-            print(f"\n  Winner: {result['winner']['driver']}")
-            print(f"    Sequence: {' -> '.join(result['winner']['compound_sequence'])}")
-            print(f"    Pits at laps: {result['winner']['pit_laps']}")
-            print(f"\n  Stop count match: {result['winner_stop_count_match']}")
-            print(f"  Sequence match:   {result['winner_sequence_match']}")
-            print(f"  Winner rank:      {result['winner_strategy_rank']}")
-            print(f"  Modal match:      {result['modal_match']}")
+
+            # Show leading-team comparisons
+            print(f"\n  Leading team strategies:")
+            for tc in result.get("team_comparisons", []):
+                rank_str = f"#{tc['strategy_rank']}" if tc["strategy_rank"] else "N/A"
+                print(
+                    f"    {tc['team']:20s} {tc['driver']:3s}: "
+                    f"{' -> '.join(tc['compound_sequence'])}"
+                )
+                print(
+                    f"      pits={tc['pit_laps']}  "
+                    f"stop={'Y' if tc['stop_count_match'] else 'N'}  "
+                    f"seq={'Y' if tc['sequence_match'] else 'N'}  "
+                    f"set={'Y' if tc['compound_set_match'] else 'N'}  "
+                    f"rank={rank_str}"
+                )
+
+            print(f"\n  Modal match: {result['modal_match']}")
             if result["modal_strategy"]:
                 ms = result["modal_strategy"]
                 print(
-                    f"  Modal strategy:   {' -> '.join(ms['compound_sequence'])} "
-                    f"({ms['count']}/{ms['total_drivers']} top-10 drivers)"
+                    f"  Modal strategy: {' -> '.join(ms['compound_sequence'])} "
+                    f"({ms['count']}/{ms['total_drivers']} leading-team drivers)"
                 )
 
-            # Show first 5 driver comparisons
-            print(f"\n  Driver comparisons (first 5 of {result['num_classified']}):")
+            # Show first 5 driver comparisons (all classified drivers)
+            print(f"\n  All driver comparisons (first 5 of {result['num_classified']}):")
             for dc in result["driver_comparisons"][:5]:
                 rank_str = f"#{dc['strategy_rank_in_predictions']}" if dc["strategy_rank_in_predictions"] else "N/A"
                 print(

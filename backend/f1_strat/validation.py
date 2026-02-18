@@ -39,6 +39,11 @@ _OUTPUT_DIR = Path(__file__).resolve().parent.parent / "validation_results"
 # because our engine only handles dry conditions right now
 _WET_COMPOUNDS = {"INTERMEDIATE", "WET"}
 
+# Top teams to compare against — these have the best strategists and
+# their strategies most closely represent the theoretical optimum.
+# Uses exact FastF1 TeamName values (check session.results["TeamName"]).
+_LEADING_TEAMS = {"McLaren", "Mercedes", "Red Bull Racing"}
+
 
 class ValidationService:
     """Compare strategy engine predictions against real race data."""
@@ -123,6 +128,16 @@ class ValidationService:
         leader_max_lap = int(leader_laps["LapNumber"].max()) if not leader_laps.empty else 0
         shortened = leader_max_lap < total_laps
 
+        # --- Build a lookup from driver abbreviation to team name ---
+        # FastF1's results DataFrame has "Abbreviation" and "TeamName" columns.
+        # We need team info so we can filter to leading teams later.
+        driver_team = {}
+        for _, row in results.iterrows():
+            abbrev = row.get("Abbreviation")
+            team = row.get("TeamName")
+            if abbrev and team:
+                driver_team[abbrev] = team
+
         # --- Extract strategy for each classified driver ---
         driver_strategies = []
         has_wet_compound = False
@@ -144,6 +159,7 @@ class ValidationService:
 
             driver_strategies.append({
                 "driver": driver,
+                "team": driver_team.get(driver, "Unknown"),
                 **strategy,
             })
 
@@ -337,10 +353,10 @@ class ValidationService:
                 "skip_reason": "no_predicted_strategies",
             }
 
-        # Our top-predicted strategy
+        # Our top-predicted strategy (unconstrained — no Q2 tyre override)
         our_best = predicted_strategies[0]
 
-        # --- Compare against each driver ---
+        # --- Compare against each driver (kept for detailed output) ---
         driver_comparisons = []
         for driver_data in actual["drivers"]:
             comparison = self._compare_driver(
@@ -348,29 +364,24 @@ class ValidationService:
             )
             driver_comparisons.append(comparison)
 
-        # --- Compute race-level summary ---
-        # Winner's strategy (first classified finisher)
-        winner = actual["drivers"][0] if actual["drivers"] else None
+        # --- Leading-team comparisons ---
+        # Instead of comparing against only the race winner, we compare
+        # against the best finisher from each leading team (McLaren, Mercedes,
+        # Red Bull).  This gives up to 3 comparison targets per race —
+        # more data points and less noise from one driver's unique situation.
+        team_comparisons = self._build_team_comparisons(
+            actual["drivers"],
+            predicted_strategies,
+        )
 
-        # Modal strategy among top-10 finishers: the most common compound
-        # sequence, which represents the "consensus" strategy for this race
-        top_10 = actual["drivers"][:10]
-        modal = self._compute_modal_strategy(top_10)
-
-        # Does our #1 prediction match the winner's stop count?
-        winner_stop_match = False
-        winner_sequence_match = False
-        winner_rank = None
-        if winner:
-            winner_stop_match = our_best["num_stops"] == winner["num_stops"]
-            winner_sequence_match = (
-                tuple(s["compound"] for s in our_best["stints"])
-                == tuple(winner["compound_sequence"])
-            )
-            # Where does the winner's actual strategy rank in our list?
-            winner_rank = self._find_strategy_rank(
-                winner["compound_sequence"], predicted_strategies
-            )
+        # --- Modal strategy among leading-team drivers ---
+        # Use leading-team drivers (not top-10) so the modal reflects what
+        # the best strategists chose, not what the whole field did.
+        leading_team_drivers = [
+            d for d in actual["drivers"]
+            if d.get("team") in _LEADING_TEAMS
+        ]
+        modal = self._compute_modal_strategy(leading_team_drivers)
 
         # Does our #1 match the modal strategy?
         modal_match = False
@@ -380,81 +391,21 @@ class ValidationService:
                 == tuple(modal["compound_sequence"])
             )
 
-        # --- Q2-aware prediction for the winner ---
-        # If the winner was a top-10 qualifier, run a second prediction
-        # constrained to their Q2 starting compound.  Only use this as the
-        # PRIMARY comparison when the winner's actual first compound matches
-        # their Q2 compound (confirming they really did start on that tyre).
-        # Otherwise keep it as supplementary data.
-        q2_winner_rank = None
-        q2_winner_compound = None
-        q2_winner_strategy = None
-        q2_stop_match = None
-        q2_seq_match = None
-        if winner:
-            try:
-                q2_data = self._session_service.get_q2_compounds(year, grand_prix)
-                winner_q2 = q2_data["q2_compounds"].get(winner["driver"])
-                if winner_q2:
-                    q2_winner_compound = winner_q2
-                    q2_prediction = self._strategy_engine.calculate(
-                        year=year,
-                        grand_prix=grand_prix,
-                        race_laps=total_laps,
-                        pit_stop_loss_s=prediction.get("pit_stop_loss_s", 22.0),
-                        max_stops=3,
-                        starting_compound=winner_q2,
-                    )
-                    q2_strategies = q2_prediction.get("strategies", [])
-                    if q2_strategies:
-                        q2_best = q2_strategies[0]
-                        q2_winner_strategy = {
-                            "name": q2_best["name"],
-                            "compound_sequence": [
-                                s["compound"] for s in q2_best["stints"]
-                            ],
-                            "pit_laps": [
-                                s["end_lap"] for s in q2_best["stints"][:-1]
-                            ],
-                        }
-                        q2_winner_rank = self._find_strategy_rank(
-                            winner["compound_sequence"], q2_strategies,
-                        )
-                        q2_stop_match = q2_best["num_stops"] == winner["num_stops"]
-                        q2_seq_match = (
-                            tuple(s["compound"] for s in q2_best["stints"])
-                            == tuple(winner["compound_sequence"])
-                        )
-
-                        # Only override the primary comparison when the winner
-                        # actually started on their Q2 compound.  This confirms
-                        # the Q2 rule was binding (they weren't penalized out of
-                        # top 10, didn't change strategy, etc.).
-                        winner_actual_first = winner["compound_sequence"][0]
-                        if winner_actual_first == winner_q2:
-                            our_best = q2_best
-                            winner_stop_match = q2_stop_match
-                            winner_sequence_match = q2_seq_match
-                            winner_rank = q2_winner_rank
-
-            except Exception as exc:
-                logger.debug("Q2 data not available for %s %s: %s", year, grand_prix, exc)
-
         # --- Safety car detection ---
-        # Flag races where the winner's strategy was likely influenced by a
-        # safety car.  We detect this by checking for consecutive pit stops
-        # within 3 laps of each other — planned strategies almost never have
-        # stops that close together, but "free" safety car stops do.
-        # Also flag extreme stop counts (4+) as likely SC/red-flag influenced.
+        # Flag races where any leading-team driver's strategy was likely
+        # influenced by a safety car.  Consecutive pit stops within 3 laps
+        # of each other are a strong SC signal, as are 4+ stops.
         likely_safety_car = False
-        if winner and winner["pit_laps"]:
-            pit_laps_sorted = sorted(winner["pit_laps"])
+        for tc in team_comparisons:
+            pit_laps_sorted = sorted(tc["pit_laps"])
             for i in range(1, len(pit_laps_sorted)):
                 if pit_laps_sorted[i] - pit_laps_sorted[i - 1] <= 3:
                     likely_safety_car = True
                     break
-            if winner["num_stops"] >= 4:
+            if tc["num_stops"] >= 4:
                 likely_safety_car = True
+            if likely_safety_car:
+                break
 
         result = {
             "year": year,
@@ -473,30 +424,74 @@ class ValidationService:
             },
             "pit_stop_loss_s": prediction.get("pit_stop_loss_s"),
             "deg_rates": prediction.get("deg_rates_used"),
-            "winner": {
-                "driver": winner["driver"] if winner else None,
-                "compound_sequence": winner["compound_sequence"] if winner else None,
-                "num_stops": winner["num_stops"] if winner else None,
-                "pit_laps": winner["pit_laps"] if winner else None,
-            },
-            "winner_stop_count_match": winner_stop_match,
-            "winner_sequence_match": winner_sequence_match,
-            "winner_strategy_rank": winner_rank,
+            "team_comparisons": team_comparisons,
             "modal_strategy": modal,
             "modal_match": modal_match,
             "driver_comparisons": driver_comparisons,
             "num_classified": len(actual["drivers"]),
         }
 
-        # Add Q2-aware comparison if available
-        if q2_winner_compound:
-            result["q2_analysis"] = {
-                "winner_q2_compound": q2_winner_compound,
-                "q2_best_strategy": q2_winner_strategy,
-                "winner_rank_with_q2": q2_winner_rank,
-            }
-
         return result
+
+    def _build_team_comparisons(
+        self,
+        drivers: list[dict],
+        predicted_strategies: list[dict],
+    ) -> list[dict]:
+        """Build per-team comparisons for leading teams.
+
+        For each team in _LEADING_TEAMS, finds the best finisher (drivers
+        are already in classification order from extract_actual_strategies),
+        then compares our #1 prediction against that driver's actual strategy.
+
+        Returns:
+            List of comparison dicts, one per team (up to 3).
+        """
+        our_best = predicted_strategies[0]
+
+        # Group drivers by team, take the first from each (= best finisher)
+        best_per_team = {}
+        for d in drivers:
+            team = d.get("team")
+            if team in _LEADING_TEAMS and team not in best_per_team:
+                best_per_team[team] = d
+
+        if not best_per_team:
+            return []
+
+        comparisons = []
+        for team in sorted(best_per_team):
+            driver_data = best_per_team[team]
+
+            # Compare our #1 against this team's best finisher
+            our_seq = tuple(s["compound"] for s in our_best["stints"])
+            actual_seq = tuple(driver_data["compound_sequence"])
+
+            stop_match = our_best["num_stops"] == driver_data["num_stops"]
+            seq_match = our_seq == actual_seq
+            set_match = set(our_seq) == set(actual_seq)
+            rank = self._find_strategy_rank(
+                driver_data["compound_sequence"], predicted_strategies
+            )
+
+            # Pit window deltas
+            our_pits = [s["end_lap"] for s in our_best["stints"][:-1]]
+            pit_deltas = compute_pit_deltas(our_pits, driver_data["pit_laps"])
+
+            comparisons.append({
+                "team": team,
+                "driver": driver_data["driver"],
+                "compound_sequence": list(actual_seq),
+                "num_stops": driver_data["num_stops"],
+                "pit_laps": driver_data["pit_laps"],
+                "stop_count_match": stop_match,
+                "sequence_match": seq_match,
+                "compound_set_match": set_match,
+                "strategy_rank": rank,
+                "pit_deltas": pit_deltas,
+            })
+
+        return comparisons
 
     def _compare_driver(
         self, driver_data: dict, predicted_strategies: list[dict],
@@ -650,14 +645,18 @@ class ValidationService:
                     if result.get("skipped"):
                         print(f"SKIPPED ({result['skip_reason']})")
                     else:
-                        # Print a quick summary line
-                        w_match = "Y" if result["winner_stop_count_match"] else "N"
-                        w_rank = result["winner_strategy_rank"]
-                        rank_str = f"#{w_rank}" if w_rank else "N/A"
+                        # Print a quick summary line showing per-team results
+                        tc = result.get("team_comparisons", [])
+                        n_teams = len(tc)
+                        stops_y = sum(1 for t in tc if t["stop_count_match"])
+                        seq_y = sum(1 for t in tc if t["sequence_match"])
+                        ranks = [t["strategy_rank"] for t in tc if t["strategy_rank"] is not None]
+                        avg_rank = f"#{sum(ranks)/len(ranks):.0f}" if ranks else "N/A"
                         print(
-                            f"stop_match={w_match}  "
-                            f"winner_rank={rank_str}  "
-                            f"seq_match={'Y' if result['winner_sequence_match'] else 'N'}"
+                            f"{n_teams} teams  "
+                            f"stop={stops_y}/{n_teams}  "
+                            f"seq={seq_y}/{n_teams}  "
+                            f"avg_rank={avg_rank}"
                         )
 
                 except Exception as exc:
@@ -695,14 +694,17 @@ class ValidationService:
     def compute_aggregates(self, race_results: list[dict]) -> dict:
         """Compute summary metrics across all analyzed races.
 
+        Aggregates across *team comparisons* (up to 3 per race) rather than
+        a single winner, giving more data points and less noise.
+
         Key metrics:
-          - stop_count_match_rate: how often our #1 matches the winner's stops
+          - stop_count_match_rate: % of team comparisons where stops matched
           - compound_sequence_match_rate: exact compound order match
-          - pit_window_accuracy: % of pit stops within ±5 laps and ±3 laps
-          - pit_window_bias: signed average (negative = we pit too early)
-          - winner_rank_distribution: histogram of where the winner's strategy
-            ranks in our predictions
-          - modal_match_rate: how often our #1 matches the field consensus
+          - compound_set_match_rate: same compounds regardless of order
+          - pit_window: deltas across all team comparisons
+          - strategy_rank: avg rank, in-top-3, in-top-5
+          - per_team: breakdown by McLaren, Mercedes, Red Bull
+          - modal_match_rate: how often our #1 matches leading-team consensus
 
         Args:
             race_results: List of per-race result dicts from run_all().
@@ -711,9 +713,6 @@ class ValidationService:
             Dict with all aggregate metrics.
         """
         # Filter to non-skipped races only.
-        # Also track which races had likely safety car influence — we still
-        # include them in the main metrics but also report SC-excluded metrics
-        # for a fairer view of engine accuracy.
         analyzed = [r for r in race_results if not r.get("skipped", True)]
         analyzed_no_sc = [r for r in analyzed if not r.get("likely_safety_car")]
 
@@ -729,37 +728,52 @@ class ValidationService:
             if r.get("skipped"):
                 skip_reasons[r.get("skip_reason", "unknown")] += 1
 
-        # --- Stop count match rate ---
-        stop_matches = sum(1 for r in analyzed if r["winner_stop_count_match"])
-        stop_match_rate = round(stop_matches / len(analyzed) * 100, 1)
+        # --- Flatten all team comparisons across all races ---
+        # Each element is one team comparison (team driver vs our prediction).
+        all_tc = []
+        all_tc_no_sc = []
+        for r in analyzed:
+            for tc in r.get("team_comparisons", []):
+                all_tc.append(tc)
+        for r in analyzed_no_sc:
+            for tc in r.get("team_comparisons", []):
+                all_tc_no_sc.append(tc)
+
+        total_comparisons = len(all_tc)
+        if total_comparisons == 0:
+            return {
+                "total_races": total_races,
+                "analyzed_races": len(analyzed),
+                "skipped_races": skipped_races,
+                "skip_reasons": dict(skip_reasons),
+                "total_team_comparisons": 0,
+            }
+
+        # --- Stop count match rate (across all team comparisons) ---
+        stop_matches = sum(1 for tc in all_tc if tc["stop_count_match"])
+        stop_match_rate = round(stop_matches / total_comparisons * 100, 1)
 
         # Stop count confusion: predicted X but actual Y
+        # Use our_best_strategy from each race since that's what we compare
         stop_confusion = Counter()
         for r in analyzed:
-            predicted = r["our_best_strategy"]["num_stops"]
-            actual = r["winner"]["num_stops"]
-            stop_confusion[(predicted, actual)] += 1
+            for tc in r.get("team_comparisons", []):
+                predicted = r["our_best_strategy"]["num_stops"]
+                actual = tc["num_stops"]
+                stop_confusion[(predicted, actual)] += 1
 
         # --- Compound sequence match rate ---
-        seq_matches = sum(1 for r in analyzed if r["winner_sequence_match"])
-        seq_match_rate = round(seq_matches / len(analyzed) * 100, 1)
+        seq_matches = sum(1 for tc in all_tc if tc["sequence_match"])
+        seq_match_rate = round(seq_matches / total_comparisons * 100, 1)
 
         # --- Compound set match rate (same compounds, any order) ---
-        set_matches = 0
-        for r in analyzed:
-            our_set = set(r["our_best_strategy"]["compound_sequence"])
-            winner_set = set(r["winner"]["compound_sequence"])
-            if our_set == winner_set:
-                set_matches += 1
-        set_match_rate = round(set_matches / len(analyzed) * 100, 1)
+        set_matches = sum(1 for tc in all_tc if tc["compound_set_match"])
+        set_match_rate = round(set_matches / total_comparisons * 100, 1)
 
         # --- Pit window accuracy ---
         all_pit_deltas = []
-        for r in analyzed:
-            our_pits = r["our_best_strategy"]["pit_laps"]
-            winner_pits = r["winner"]["pit_laps"]
-            deltas = compute_pit_deltas(our_pits, winner_pits)
-            all_pit_deltas.extend(deltas)
+        for tc in all_tc:
+            all_pit_deltas.extend(tc.get("pit_deltas", []))
 
         pit_within_3 = sum(1 for d in all_pit_deltas if abs(d) <= 3)
         pit_within_5 = sum(1 for d in all_pit_deltas if abs(d) <= 5)
@@ -769,9 +783,9 @@ class ValidationService:
         # Pit window bias: average signed delta (negative = we pit too early)
         pit_bias = round(sum(all_pit_deltas) / len(all_pit_deltas), 1) if all_pit_deltas else 0
 
-        # --- Winner strategy rank distribution ---
-        rank_values = [r["winner_strategy_rank"] for r in analyzed if r["winner_strategy_rank"] is not None]
-        not_found = sum(1 for r in analyzed if r["winner_strategy_rank"] is None)
+        # --- Strategy rank distribution ---
+        rank_values = [tc["strategy_rank"] for tc in all_tc if tc["strategy_rank"] is not None]
+        not_found = sum(1 for tc in all_tc if tc["strategy_rank"] is None)
         in_top_3 = sum(1 for v in rank_values if v <= 3)
         in_top_5 = sum(1 for v in rank_values if v <= 5)
         avg_rank = round(sum(rank_values) / len(rank_values), 1) if rank_values else None
@@ -785,37 +799,75 @@ class ValidationService:
         for r in analyzed:
             yr = r["year"]
             if yr not in by_year:
-                by_year[yr] = {"races": 0, "stop_matches": 0, "seq_matches": 0}
+                by_year[yr] = {
+                    "races": 0, "comparisons": 0,
+                    "stop_matches": 0, "seq_matches": 0, "set_matches": 0,
+                }
             by_year[yr]["races"] += 1
-            if r["winner_stop_count_match"]:
-                by_year[yr]["stop_matches"] += 1
-            if r["winner_sequence_match"]:
-                by_year[yr]["seq_matches"] += 1
+            for tc in r.get("team_comparisons", []):
+                by_year[yr]["comparisons"] += 1
+                if tc["stop_count_match"]:
+                    by_year[yr]["stop_matches"] += 1
+                if tc["sequence_match"]:
+                    by_year[yr]["seq_matches"] += 1
+                if tc["compound_set_match"]:
+                    by_year[yr]["set_matches"] += 1
 
         for yr_data in by_year.values():
-            n = yr_data["races"]
+            n = yr_data["comparisons"]
             yr_data["stop_match_rate"] = round(yr_data["stop_matches"] / n * 100, 1) if n else 0
             yr_data["seq_match_rate"] = round(yr_data["seq_matches"] / n * 100, 1) if n else 0
+            yr_data["set_match_rate"] = round(yr_data["set_matches"] / n * 100, 1) if n else 0
 
         # --- Compound over/under-recommendation ---
-        # Track how often we recommend each compound vs how often it's actually used
+        # Track how often we recommend each compound vs how often leading teams use it
         compound_predicted = Counter()
         compound_actual = Counter()
         for r in analyzed:
+            # Count our predicted compounds once per race (not per team comparison)
             for c in r["our_best_strategy"]["compound_sequence"]:
                 compound_predicted[c] += 1
-            for c in r["winner"]["compound_sequence"]:
-                compound_actual[c] += 1
+            # Count actual compounds from each team comparison
+            for tc in r.get("team_comparisons", []):
+                for c in tc["compound_sequence"]:
+                    compound_actual[c] += 1
+
+        # --- Per-team breakdown ---
+        # Show how well we match each team individually
+        per_team = {}
+        for tc in all_tc:
+            team = tc["team"]
+            if team not in per_team:
+                per_team[team] = {
+                    "comparisons": 0, "stop_matches": 0,
+                    "seq_matches": 0, "set_matches": 0,
+                    "ranks": [],
+                }
+            per_team[team]["comparisons"] += 1
+            if tc["stop_count_match"]:
+                per_team[team]["stop_matches"] += 1
+            if tc["sequence_match"]:
+                per_team[team]["seq_matches"] += 1
+            if tc["compound_set_match"]:
+                per_team[team]["set_matches"] += 1
+            if tc["strategy_rank"] is not None:
+                per_team[team]["ranks"].append(tc["strategy_rank"])
+
+        for team_data in per_team.values():
+            n = team_data["comparisons"]
+            team_data["stop_match_rate"] = round(team_data["stop_matches"] / n * 100, 1) if n else 0
+            team_data["seq_match_rate"] = round(team_data["seq_matches"] / n * 100, 1) if n else 0
+            team_data["set_match_rate"] = round(team_data["set_matches"] / n * 100, 1) if n else 0
+            ranks = team_data.pop("ranks")
+            team_data["avg_rank"] = round(sum(ranks) / len(ranks), 1) if ranks else None
 
         # --- Safety car exclusion metrics ---
-        # Repeat the key metrics excluding likely-SC-influenced races for a
-        # fairer view of the engine's accuracy on "clean" races.
         sc_count = len(analyzed) - len(analyzed_no_sc)
-        if analyzed_no_sc:
-            sc_stop_matches = sum(1 for r in analyzed_no_sc if r["winner_stop_count_match"])
-            sc_seq_matches = sum(1 for r in analyzed_no_sc if r["winner_sequence_match"])
-            sc_stop_rate = round(sc_stop_matches / len(analyzed_no_sc) * 100, 1)
-            sc_seq_rate = round(sc_seq_matches / len(analyzed_no_sc) * 100, 1)
+        if all_tc_no_sc:
+            sc_stop_matches = sum(1 for tc in all_tc_no_sc if tc["stop_count_match"])
+            sc_seq_matches = sum(1 for tc in all_tc_no_sc if tc["sequence_match"])
+            sc_stop_rate = round(sc_stop_matches / len(all_tc_no_sc) * 100, 1)
+            sc_seq_rate = round(sc_seq_matches / len(all_tc_no_sc) * 100, 1)
         else:
             sc_stop_rate = 0
             sc_seq_rate = 0
@@ -825,6 +877,7 @@ class ValidationService:
             "analyzed_races": len(analyzed),
             "skipped_races": skipped_races,
             "skip_reasons": dict(skip_reasons),
+            "total_team_comparisons": total_comparisons,
             "stop_count_match_rate_pct": stop_match_rate,
             "stop_count_confusion": {
                 f"predicted_{p}_actual_{a}": count
@@ -838,7 +891,7 @@ class ValidationService:
                 "within_5_laps_pct": pit_accuracy_5,
                 "bias_laps": pit_bias,
             },
-            "winner_strategy_rank": {
+            "strategy_rank": {
                 "in_top_3": in_top_3,
                 "in_top_5": in_top_5,
                 "not_found": not_found,
@@ -846,23 +899,25 @@ class ValidationService:
                 "total_with_rank": len(rank_values),
             },
             "modal_match_rate_pct": modal_match_rate,
+            "per_team": per_team,
             "safety_car_excluded": {
                 "likely_sc_races": sc_count,
                 "clean_races": len(analyzed_no_sc),
+                "clean_comparisons": len(all_tc_no_sc),
                 "stop_match_rate_pct": sc_stop_rate,
                 "seq_match_rate_pct": sc_seq_rate,
             },
             "by_year": by_year,
             "compound_balance": {
                 "predicted": dict(compound_predicted),
-                "actual_winner": dict(compound_actual),
+                "actual_leading_teams": dict(compound_actual),
             },
         }
 
     def _print_summary(self, agg: dict) -> None:
         """Print a human-readable summary of validation results."""
         print("\n" + "=" * 70)
-        print("  VALIDATION SUMMARY")
+        print("  VALIDATION SUMMARY (vs leading teams)")
         print("=" * 70)
         print(f"  Total races: {agg['total_races']}")
         print(f"  Analyzed:    {agg['analyzed_races']}")
@@ -876,25 +931,43 @@ class ValidationService:
             print("=" * 70)
             return
 
+        n_tc = agg.get("total_team_comparisons", 0)
+        print(f"  Team comparisons: {n_tc} (across {agg['analyzed_races']} races)")
+
         print(f"\n  Stop count match:      {agg['stop_count_match_rate_pct']}%")
         print(f"  Compound seq match:    {agg['compound_sequence_match_rate_pct']}%")
         print(f"  Compound set match:    {agg['compound_set_match_rate_pct']}%")
         print(f"  Modal strategy match:  {agg['modal_match_rate_pct']}%")
 
         pw = agg["pit_window"]
-        print(f"\n  Pit window (vs winner):")
+        print(f"\n  Pit window (vs leading teams):")
         print(f"    Within ±3 laps: {pw['within_3_laps_pct']}%")
         print(f"    Within ±5 laps: {pw['within_5_laps_pct']}%")
         print(f"    Bias:           {pw['bias_laps']:+.1f} laps "
               f"({'too early' if pw['bias_laps'] < 0 else 'too late' if pw['bias_laps'] > 0 else 'neutral'})")
 
-        wr = agg["winner_strategy_rank"]
-        print(f"\n  Winner's strategy in our predictions:")
-        print(f"    In top 3: {wr['in_top_3']}/{wr['total_with_rank']}")
-        print(f"    In top 5: {wr['in_top_5']}/{wr['total_with_rank']}")
-        if wr["average_rank"]:
-            print(f"    Avg rank: {wr['average_rank']}")
-        print(f"    Not found (e.g. 3-stop): {wr['not_found']}")
+        sr = agg["strategy_rank"]
+        print(f"\n  Leading-team strategies in our predictions:")
+        print(f"    In top 3: {sr['in_top_3']}/{sr['total_with_rank']}")
+        print(f"    In top 5: {sr['in_top_5']}/{sr['total_with_rank']}")
+        if sr["average_rank"]:
+            print(f"    Avg rank: {sr['average_rank']}")
+        print(f"    Not found (e.g. 3-stop): {sr['not_found']}")
+
+        # Per-team breakdown
+        per_team = agg.get("per_team", {})
+        if per_team:
+            print(f"\n  Per-team breakdown:")
+            for team in sorted(per_team):
+                td = per_team[team]
+                rank_str = f"avg_rank={td['avg_rank']}" if td["avg_rank"] else "avg_rank=N/A"
+                print(
+                    f"    {team:20s}  n={td['comparisons']:2d}  "
+                    f"stop={td['stop_match_rate']}%  "
+                    f"seq={td['seq_match_rate']}%  "
+                    f"set={td['set_match_rate']}%  "
+                    f"{rank_str}"
+                )
 
         # Stop count confusion matrix
         print(f"\n  Stop count breakdown:")
@@ -905,24 +978,29 @@ class ValidationService:
         print(f"\n  By year:")
         for yr, data in sorted(agg["by_year"].items()):
             print(
-                f"    {yr}: {data['races']} races, "
-                f"stop_match={data['stop_match_rate']}%, "
-                f"seq_match={data['seq_match_rate']}%"
+                f"    {yr}: {data['races']} races ({data['comparisons']} comparisons), "
+                f"stop={data['stop_match_rate']}%, "
+                f"seq={data['seq_match_rate']}%, "
+                f"set={data['set_match_rate']}%"
             )
 
         # Safety car exclusion
         sc = agg.get("safety_car_excluded", {})
         if sc.get("likely_sc_races"):
-            print(f"\n  Excluding {sc['likely_sc_races']} likely safety-car races ({sc['clean_races']} clean):")
+            print(
+                f"\n  Excluding {sc['likely_sc_races']} likely safety-car races "
+                f"({sc['clean_races']} clean, {sc['clean_comparisons']} comparisons):"
+            )
             print(f"    Stop match (clean): {sc['stop_match_rate_pct']}%")
             print(f"    Seq match (clean):  {sc['seq_match_rate_pct']}%")
 
         # Compound balance
-        print(f"\n  Compound usage (predicted vs actual winner):")
-        all_compounds = set(agg["compound_balance"]["predicted"]) | set(agg["compound_balance"]["actual_winner"])
+        print(f"\n  Compound usage (predicted vs leading teams):")
+        actual_key = "actual_leading_teams"
+        all_compounds = set(agg["compound_balance"]["predicted"]) | set(agg["compound_balance"][actual_key])
         for c in sorted(all_compounds):
             pred = agg["compound_balance"]["predicted"].get(c, 0)
-            act = agg["compound_balance"]["actual_winner"].get(c, 0)
+            act = agg["compound_balance"][actual_key].get(c, 0)
             diff = pred - act
             print(f"    {c:8s}  predicted={pred:3d}  actual={act:3d}  diff={diff:+d}")
 

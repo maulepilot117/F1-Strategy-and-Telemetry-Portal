@@ -322,12 +322,15 @@ def test_spain_has_driver_comparisons(spain_2024_validation):
     )
 
 
-def test_spain_has_winner(spain_2024_validation):
-    """Should identify a winner with a valid strategy."""
-    winner = spain_2024_validation["winner"]
-    assert winner["driver"] is not None
-    assert len(winner["compound_sequence"]) >= 2  # At least 2 compounds (1 stop min)
-    assert winner["num_stops"] >= 1
+def test_spain_has_team_comparisons(spain_2024_validation):
+    """Should have at least one leading-team comparison."""
+    tc = spain_2024_validation.get("team_comparisons", [])
+    assert len(tc) >= 1, "Expected at least 1 leading-team comparison for Spain 2024"
+    # Each comparison should have a valid driver and strategy
+    for comp in tc:
+        assert comp["driver"] is not None
+        assert len(comp["compound_sequence"]) >= 2
+        assert comp["num_stops"] >= 1
 
 
 def test_spain_our_prediction_exists(spain_2024_validation):
@@ -338,18 +341,17 @@ def test_spain_our_prediction_exists(spain_2024_validation):
     assert our["num_stops"] >= 1
 
 
-def test_spain_winner_rank_exists(spain_2024_validation):
-    """The winner's strategy should appear somewhere in our predictions.
+def test_spain_team_strategy_rank_exists(spain_2024_validation):
+    """At least one leading team's strategy should rank in our predictions.
 
-    Spain 2024: Verstappen won with SOFT->MEDIUM->SOFT.  Our engine should
-    have this compound sequence in its list, even if it's not ranked #1.
-    (Our engine doesn't account for qualifying tyre rules — drivers must
-    start on the tyre they set their Q2 time on, which is usually SOFT.)
+    Spain 2024 had McLaren, Mercedes, and Red Bull all finishing.  At least
+    one of their strategies should appear in our predicted list.
     """
-    rank = spain_2024_validation["winner_strategy_rank"]
-    assert rank is not None, (
-        "Winner's strategy not found in our predictions — "
-        "it might be a 3-stop or unusual strategy we don't generate"
+    tc = spain_2024_validation.get("team_comparisons", [])
+    ranks = [c["strategy_rank"] for c in tc if c["strategy_rank"] is not None]
+    assert len(ranks) >= 1, (
+        "No leading-team strategies found in our predictions — "
+        "they might all be unusual strategies we don't generate"
     )
 
 
@@ -368,6 +370,21 @@ def test_spain_has_deg_rates(spain_2024_validation):
     assert "SOFT" in spain_2024_validation["deg_rates"]
     assert "MEDIUM" in spain_2024_validation["deg_rates"]
     assert "HARD" in spain_2024_validation["deg_rates"]
+
+
+def test_spain_team_comparison_structure(spain_2024_validation):
+    """Each team comparison should have the expected fields."""
+    for tc in spain_2024_validation.get("team_comparisons", []):
+        assert "team" in tc
+        assert "driver" in tc
+        assert "compound_sequence" in tc
+        assert "num_stops" in tc
+        assert "pit_laps" in tc
+        assert "stop_count_match" in tc
+        assert "sequence_match" in tc
+        assert "compound_set_match" in tc
+        assert "strategy_rank" in tc
+        assert "pit_deltas" in tc
 
 
 def test_spain_driver_comparison_structure(spain_2024_validation):
@@ -395,19 +412,22 @@ def test_print_spain_validation(spain_2024_validation):
     print(f"\n  Our #1: {r['our_best_strategy']['name']}")
     print(f"    Pits at: {r['our_best_strategy']['pit_laps']}")
 
-    w = r["winner"]
-    print(f"\n  Winner: {w['driver']}")
-    print(f"    Strategy: {' -> '.join(w['compound_sequence'])}")
-    print(f"    Pits at: {w['pit_laps']}")
-
-    print(f"\n  Stop count match:  {r['winner_stop_count_match']}")
-    print(f"  Sequence match:    {r['winner_sequence_match']}")
-    print(f"  Winner rank:       #{r['winner_strategy_rank']}")
+    print(f"\n  Leading team comparisons:")
+    for tc in r.get("team_comparisons", []):
+        rank_str = f"#{tc['strategy_rank']}" if tc["strategy_rank"] else "N/A"
+        print(
+            f"    {tc['team']:20s} {tc['driver']:3s}: "
+            f"{' -> '.join(tc['compound_sequence'])}  "
+            f"stop={'Y' if tc['stop_count_match'] else 'N'}  "
+            f"seq={'Y' if tc['sequence_match'] else 'N'}  "
+            f"set={'Y' if tc['compound_set_match'] else 'N'}  "
+            f"rank={rank_str}"
+        )
 
     if r["modal_strategy"]:
         ms = r["modal_strategy"]
         print(
-            f"  Modal: {' -> '.join(ms['compound_sequence'])} "
+            f"\n  Modal: {' -> '.join(ms['compound_sequence'])} "
             f"({ms['count']}/{ms['total_drivers']})"
         )
     print(f"  Modal match: {r['modal_match']}")
