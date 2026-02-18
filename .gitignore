@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+venv/
+.venv/
+
+# FastF1 cache (large binary data files)
+.fastf1_cache/
+
+# pytest
+.pytest_cache/
+
+# IDE
+.vscode/
+.idea/
+
+# Validation output (large JSON files from strategy analysis)
+validation_results/
+
+# OS
+.DS_Store
+.playwright-mcp/
+*.png

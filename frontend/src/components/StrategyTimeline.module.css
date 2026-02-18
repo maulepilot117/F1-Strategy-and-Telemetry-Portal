@@ -1,0 +1,44 @@
+/* Colored stint bars — pure CSS flex, no chart library needed.
+   Each stint is a flex child whose width is proportional to its lap count. */
+
+/* Wrapper allows weather overlay to sit behind stint bars */
+.timelineWrapper {
+  position: relative;
+}
+
+/* Weather condition overlay: subtle colored background behind stint bars */
+.weatherOverlay {
+  display: flex;
+  height: 28px;
+  border-radius: 4px;
+  overflow: hidden;
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  pointer-events: none;
+}
+
+.weatherSegment {
+  height: 100%;
+}
+
+.timeline {
+  display: flex;
+  gap: 2px;
+  height: 28px;
+  border-radius: 4px;
+  overflow: hidden;
+  position: relative; /* Sits on top of weather overlay */
+}
+
+.stint {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.7rem;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  min-width: 30px;
+}

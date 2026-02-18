@@ -1,0 +1,40 @@
+.container {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 24px;
+}
+
+.header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px 20px;
+  margin-bottom: 20px;
+}
+
+.title {
+  font-size: 1.1rem;
+  font-weight: 600;
+}
+
+/* Show each compound's deg rate as a small colored badge */
+.rate {
+  font-size: 0.8rem;
+  font-weight: 500;
+  padding: 2px 8px;
+  border-radius: 4px;
+  background: var(--bg-input);
+}
+
+.chartWrapper {
+  width: 100%;
+  height: 320px;
+}
+
+.noData {
+  color: var(--text-secondary);
+  font-style: italic;
+  padding: 40px 0;
+  text-align: center;
+}

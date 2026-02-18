@@ -1,0 +1,165 @@
+/* Weather scenario builder — lets users define weather changes during a race */
+
+.container {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* Toggle row: "Weather" label + Dry Only / Custom Weather buttons */
+.toggleRow {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.toggleLabel {
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-secondary);
+}
+
+.toggleButtons {
+  display: flex;
+  gap: 0;
+  border-radius: 6px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+}
+
+.toggleBtn {
+  background: var(--bg-input);
+  color: var(--text-secondary);
+  border: none;
+  padding: 6px 16px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  font-family: var(--font-family);
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.toggleBtn:first-child {
+  border-right: 1px solid var(--border);
+}
+
+.toggleActive {
+  background: var(--accent);
+  color: #fff;
+}
+
+/* Preview bar: colored segments showing weather across the race */
+.previewBar {
+  display: flex;
+  height: 24px;
+  border-radius: 4px;
+  overflow: hidden;
+  gap: 1px;
+}
+
+.previewSegment {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 40px;
+  transition: background-color 0.2s;
+}
+
+.previewLabel {
+  font-size: 0.65rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+/* Window rows */
+.windowList {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.windowRow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.conditionSelect {
+  width: 180px;
+  font-size: 0.85rem;
+}
+
+.lapRange {
+  font-size: 0.85rem;
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+}
+
+.lapCount {
+  color: var(--text-muted);
+  font-size: 0.78rem;
+}
+
+/* Transition lap control */
+.transitionControl {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.transitionLabel {
+  font-size: 0.7rem;
+  color: var(--text-muted);
+}
+
+.transitionInput {
+  width: 64px;
+  font-size: 0.85rem;
+}
+
+/* Remove button */
+.removeBtn {
+  background: none;
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  width: 24px;
+  height: 24px;
+  border-radius: 4px;
+  font-size: 1rem;
+  line-height: 1;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.15s;
+}
+
+.removeBtn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* Add weather change button */
+.addBtn {
+  background: var(--bg-input);
+  border: 1px dashed var(--border);
+  color: var(--text-secondary);
+  border-radius: 6px;
+  padding: 6px 16px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  font-family: var(--font-family);
+  cursor: pointer;
+  align-self: flex-start;
+  transition: all 0.15s;
+}
+
+.addBtn:hover {
+  border-color: var(--accent);
+  color: var(--text-primary);
+}

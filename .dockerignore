@@ -1,0 +1,22 @@
+# Python
+backend/venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# FastF1 cache (rebuilt at runtime, persisted via Docker volume)
+backend/.fastf1_cache/
+
+# Node / Frontend build artifacts
+frontend/node_modules/
+frontend/dist/
+
+# Git and IDE
+.git/
+.gitignore
+.claude/
+*.md
+
+# Docker (avoid recursive context)
+Dockerfile
+docker-compose*.yml

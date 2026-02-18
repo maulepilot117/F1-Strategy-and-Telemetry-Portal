@@ -1,0 +1,93 @@
+.container {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.title {
+  font-size: 1.1rem;
+  font-weight: 600;
+}
+
+.regulations {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+}
+
+.card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+/* Highlight the top-ranked strategy */
+.cardBest {
+  border-color: var(--border-highlight);
+}
+
+.cardHeader {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.rank {
+  font-size: 0.75rem;
+  font-weight: 700;
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: var(--bg-input);
+  color: var(--text-secondary);
+  flex-shrink: 0;
+}
+
+.rankBest {
+  background: var(--accent);
+  color: #fff;
+}
+
+.name {
+  font-weight: 600;
+  font-size: 0.95rem;
+  flex: 1;
+}
+
+.time {
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.gap {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Weather scenario summary shown above strategies in mixed mode */
+.weatherSummary {
+  font-size: 0.82rem;
+  color: var(--compound-intermediate);
+  font-weight: 500;
+}
+
+.stintDetails {
+  font-size: 0.78rem;
+  color: var(--text-secondary);
+}
+
+/* Small tag showing "rain" or "wet" next to stint details */
+.conditionTag {
+  color: var(--compound-intermediate);
+  font-size: 0.7rem;
+  font-weight: 600;
+}

@@ -1,0 +1,69 @@
+/* F1 broadcast-inspired dark theme.
+   All colors are defined here as CSS custom properties so components
+   can reference them without hardcoding hex values everywhere. */
+
+:root {
+  /* Page backgrounds */
+  --bg-page: #111111;
+  --bg-card: #1a1a1a;
+  --bg-input: #222222;
+
+  /* Text */
+  --text-primary: #f0f0f0;
+  --text-secondary: #888888;
+  --text-muted: #555555;
+
+  /* F1 red — used for buttons and key accents */
+  --accent: #e10600;
+  --accent-hover: #ff1a0e;
+
+  /* Tyre compound colors (matches F1 broadcast) */
+  --compound-soft: #FF3333;
+  --compound-medium: #FFD700;
+  --compound-hard: #FFFFFF;
+  --compound-intermediate: #00CC00;  /* F1 green — intermediate (light rain) */
+  --compound-wet: #0088FF;           /* F1 blue — full wet (heavy rain) */
+
+  /* Borders and dividers */
+  --border: #2a2a2a;
+  --border-highlight: #e10600;
+
+  /* Font stack: Inter from Google Fonts, falling back to system fonts */
+  --font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+}
+
+/* Global reset and base styles */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: var(--font-family);
+  background-color: var(--bg-page);
+  color: var(--text-primary);
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Shared input/select styles for the F1 dark theme */
+input[type="number"],
+select {
+  background: var(--bg-input);
+  color: var(--text-primary);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 12px;
+  font-size: 0.9rem;
+  font-family: var(--font-family);
+  outline: none;
+  transition: border-color 0.15s;
+}
+
+input[type="number"]:focus,
+select:focus {
+  border-color: var(--accent);
+}
