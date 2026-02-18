@@ -820,15 +820,17 @@ class ValidationService:
             yr_data["set_match_rate"] = round(yr_data["set_matches"] / n * 100, 1) if n else 0
 
         # --- Compound over/under-recommendation ---
-        # Track how often we recommend each compound vs how often leading teams use it
+        # Track how often we recommend each compound vs how often leading teams use it.
+        # Both sides are counted per team comparison so the totals are comparable:
+        # for each comparison, we add our predicted stints AND that team's actual stints.
         compound_predicted = Counter()
         compound_actual = Counter()
         for r in analyzed:
-            # Count our predicted compounds once per race (not per team comparison)
-            for c in r["our_best_strategy"]["compound_sequence"]:
-                compound_predicted[c] += 1
-            # Count actual compounds from each team comparison
             for tc in r.get("team_comparisons", []):
+                # Count our predicted compounds once per comparison (not per race)
+                for c in r["our_best_strategy"]["compound_sequence"]:
+                    compound_predicted[c] += 1
+                # Count that team's actual compounds
                 for c in tc["compound_sequence"]:
                     compound_actual[c] += 1
 
