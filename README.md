@@ -21,6 +21,7 @@ Switch to Live mode during a race to follow a team's two drivers in real time:
 
 - **Real-time telemetry** — Position, gap, interval, tyre compound, tyre age, lap times via Server-Sent Events
 - **Team focus** — Select your team and see both drivers side-by-side
+- **Mid-race strategy recalculation** — Engine recalculates optimal remaining strategies on every pit stop and safety car change, showing top 3 recommendations per driver
 - **Safety car detection** — SC/VSC status tracked from race control messages
 - **Race control log** — Live feed of flags, safety cars, and race director messages
 - **Pit stop tracking** — Records every pit stop with lap number and duration
@@ -137,7 +138,7 @@ cd frontend && deno task build
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | GET | `/api/live/status/{year}/{grand_prix}` | Check if a session is available for tracking |
-| POST | `/api/live/start/{session_key}?total_laps=N` | Start polling OpenF1 for live data |
+| POST | `/api/live/start/{session_key}?total_laps=N&year=Y&grand_prix=GP` | Start polling OpenF1 with strategy recalculation |
 | GET | `/api/live/drivers/{year}/{grand_prix}` | Teams and drivers for the team selector |
 | GET | `/api/live/stream/{session_key}` | SSE stream of full race state snapshots |
 
@@ -191,11 +192,17 @@ The live tracking system polls the [OpenF1 API](https://openf1.org) and pushes s
 ```
 OpenF1 API  →  Backend polling loop (8s intervals)  →  Module-level state dict
                                                             ↓
-Browser  ←  SSE (EventSourceResponse)  ←  Full state snapshot on each update
+                                                    Strategy recalculation
+                                                    (triggered by pit events
+                                                     and SC/VSC changes)
+                                                            ↓
+Browser  ←  SSE (EventSourceResponse)  ←  Full state snapshot + strategy recommendations
 ```
 
 - **Single worker** — `--workers 1` because race state lives in module-level memory
 - **Automatic lifecycle** — Polling starts on first SSE client, stops after 5 minutes with no clients or when the race ends
+- **Mid-race recalculation** — `calculate_remaining()` runs on pit events and safety car changes, using the driver's current compound, tyre age, and stops completed to find optimal strategies for the remaining laps
+- **Coalesced triggers** — Rapid events (e.g., multiple cars pitting on the same lap) are coalesced into a single recalculation to avoid redundant work
 - **Rate limit handling** — 429 responses trigger exponential backoff; 401/403 stops polling
 - **Reconnection** — EventSource auto-reconnects; each SSE message is a full snapshot so no data is lost
 - **Keepalive** — Server sends SSE comments every 15s during quiet periods to keep the connection alive through nginx
