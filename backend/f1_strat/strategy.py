@@ -113,6 +113,20 @@ _COMPOUND_SOFTNESS = {
 _TRACK_POSITION_PACE_S = 0.05
 _LAST_STINT_SOFT_PENALTY_S = 1.5
 
+# ---------------------------------------------------------------------------
+# Compound base pace offset scaling
+#
+# Raw practice offsets are inflated ~2.5× because different compounds are
+# run with different fuel loads, engine modes, and car setups in practice.
+# SOFT runs are typically low-fuel qualifying sims (fast baseline), while
+# HARD runs are high-fuel race sims (slow baseline).  At 0.03 s/kg, a
+# 25 kg fuel difference alone accounts for ~0.75s of the apparent offset.
+#
+# Scaling by 0.4 brings practice offsets in line with community consensus
+# (~MEDIUM +0.5s, HARD +1.0s vs SOFT).
+# ---------------------------------------------------------------------------
+_COMPOUND_OFFSET_SCALING = 0.4
+
 
 # ---------------------------------------------------------------------------
 # FIA tyre regulations by year.
@@ -321,7 +335,7 @@ class StrategyEngine:
         grand_prix: str | int,
         race_laps: int,
         pit_stop_loss_s: float = 22.0,
-        fuel_correction_s: float = 0.07,
+        fuel_correction_s: float = 0.055,
         conditions: str = "dry",
         intermediate_deg_rate: float = 0.12,
         wet_deg_rate: float = 0.15,
@@ -355,7 +369,8 @@ class StrategyEngine:
             pit_stop_loss_s: Time lost per pit stop in seconds.
                 ~22s is average; Monaco ~25s, Monza ~20s.
             fuel_correction_s: Seconds per lap the car gets faster as
-                fuel burns off.  Default 0.07 matches the degradation module.
+                fuel burns off.  Default 0.055 matches community consensus
+                (~0.03 s/kg × ~1.8 kg/lap).
             conditions: Race conditions — 'dry', 'intermediate', or 'wet'.
                 Ignored when weather_windows is provided.
             intermediate_deg_rate: Default deg rate (s/lap) for INTERMEDIATE
@@ -582,7 +597,13 @@ class StrategyEngine:
         }
 
         # -- Compound base pace offsets (dry compounds only) -----------------
-        compound_offsets = dict(deg_data.get("compound_offsets", {}))
+        # Scale down raw practice offsets — same reason as the dry path:
+        # practice baselines are inflated by fuel/setup/mode differences.
+        raw_offsets = deg_data.get("compound_offsets", {})
+        compound_offsets = {
+            compound: round(offset * _COMPOUND_OFFSET_SCALING, 3)
+            for compound, offset in raw_offsets.items()
+        }
 
         # -- Base lap time (dry) -------------------------------------------
         base_lap_time = self._session_service.get_base_lap_time(year, grand_prix)
@@ -910,7 +931,15 @@ class StrategyEngine:
             # These offsets capture that inherent pace gap, independent of
             # degradation rate.  NOT scaled by deg_scaling because they
             # represent inherent compound pace, not degradation.
-            compound_offsets = dict(deg_data.get("compound_offsets", {}))
+            #
+            # Raw practice offsets are scaled down by _COMPOUND_OFFSET_SCALING
+            # (0.4) because practice baselines are inflated by fuel load,
+            # engine mode, and setup differences between compound runs.
+            raw_offsets = deg_data.get("compound_offsets", {})
+            compound_offsets = {
+                compound: round(offset * _COMPOUND_OFFSET_SCALING, 3)
+                for compound, offset in raw_offsets.items()
+            }
 
             # Fallback: if HARD data is missing from practice (teams often
             # don't do long HARD runs in practice), estimate it from the

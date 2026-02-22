@@ -10,6 +10,9 @@ The tricky part: as fuel burns off (~1.5 kg per lap), the car gets lighter
 and naturally faster.  This masks tyre degradation in raw lap times.  We
 correct for this by adding back the estimated fuel effect, so the curve
 shows only the tyre-driven slowdown.
+
+Community consensus is ~0.03 s/kg fuel effect, which at ~1.8 kg/lap
+translates to ~0.055 s/lap.  We use this as the default correction.
 """
 
 import logging
@@ -121,7 +124,7 @@ class DegradationService:
         self,
         year: int,
         grand_prix: str | int,
-        fuel_correction_s: float = 0.07,
+        fuel_correction_s: float = 0.055,
         history_years: int = _DEFAULT_HISTORY_YEARS,
     ) -> dict:
         """Calculate tyre degradation curves for a race weekend.
@@ -137,8 +140,9 @@ class DegradationService:
             year: Season year (e.g. 2024).
             grand_prix: GP name ('Spain') or round number.
             fuel_correction_s: Seconds per lap to add back for fuel burn-off.
-                Cars get about 0.07s faster each lap as fuel depletes, which
-                hides tyre degradation in raw times.  We correct for this.
+                Community consensus is ~0.03 s/kg × ~1.8 kg/lap ≈ 0.055 s/lap.
+                Cars get lighter each lap as fuel depletes, which hides tyre
+                degradation in raw times.  We correct for this.
             history_years: How many years of historical race data to use for
                 quadratic stabilization (default 3, 0 = practice only).
 
@@ -265,7 +269,7 @@ class DegradationService:
         self,
         year: int,
         grand_prix: str | int,
-        fuel_correction_s: float = 0.07,
+        fuel_correction_s: float = 0.055,
     ) -> dict:
         """Calculate degradation curves for wet-weather compounds.
 
@@ -396,7 +400,7 @@ class DegradationService:
         year: int,
         grand_prix: str | int,
         history_years: int = _DEFAULT_HISTORY_YEARS,
-        fuel_correction_s: float = 0.07,
+        fuel_correction_s: float = 0.055,
     ) -> pd.DataFrame:
         """Load race stints from previous years at the same circuit.
 
@@ -674,7 +678,7 @@ class DegradationService:
                 raw_delta = lap["LapTime_s"] - baseline_s
 
                 # Fuel correction: on lap i after peak, the car is lighter
-                # by (i * fuel_per_lap), making it ~(i * 0.07)s faster.
+                # by (i * fuel_per_lap), making it ~(i * 0.055)s faster.
                 # We add this back to reveal the true tyre degradation.
                 corrected_delta = raw_delta + (fuel_correction_s * i)
 

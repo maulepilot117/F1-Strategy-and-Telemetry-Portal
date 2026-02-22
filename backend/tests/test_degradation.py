@@ -91,7 +91,7 @@ def test_curve_starts_near_zero(degradation_data):
 
 def test_fuel_correction_applied(degradation_data):
     """The fuel correction value should be recorded in the output."""
-    assert degradation_data["fuel_correction_s_per_lap"] == 0.07
+    assert degradation_data["fuel_correction_s_per_lap"] == 0.055
 
 
 def test_event_metadata(degradation_data):
