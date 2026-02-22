@@ -3,16 +3,26 @@
 # Stage 2: Runtime with Python (FastAPI) + nginx (reverse proxy)
 
 # ── Stage 1: Build React frontend ───────────────────────────────────
-FROM denoland/deno:alpine AS frontend-build
+# Use Debian-based image (not Alpine) because @tailwindcss/oxide requires
+# platform-specific native bindings.  Alpine uses musl libc and Deno's npm
+# compatibility doesn't reliably install musl optional dependencies.
+# Debian with glibc resolves the correct -linux-*-gnu bindings automatically.
+FROM denoland/deno:debian AS frontend-build
 
 WORKDIR /build
 
 # Copy dependency manifests first — Docker caches the install layer
-# so it only re-runs when dependencies change, not on every code edit
-COPY frontend/package.json frontend/deno.json frontend/deno.lock ./
-RUN deno install
+# so it only re-runs when dependencies change, not on every code edit.
+# The lockfile is excluded because it may contain platform-specific
+# resolutions (e.g. macOS-arm64 native bindings for @tailwindcss/oxide)
+# that won't work on Alpine Linux (musl).  Deno regenerates the lockfile
+# on install with the correct platform bindings.
+COPY frontend/package.json frontend/deno.json ./
+RUN deno install --frozen=false
 
-# Now copy the rest of the frontend source and build it
+# Now copy the rest of the frontend source and build it.
+# --frozen=false allows the build to proceed without a matching lockfile
+# since we regenerated it in the install step above.
 COPY frontend/ ./
 RUN deno task build
 
