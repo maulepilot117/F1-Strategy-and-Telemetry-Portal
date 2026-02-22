@@ -67,6 +67,9 @@ def _reset_state():
         live_race._last_timestamps[key] = None
     # Force-close any existing client (sync — ok for test cleanup)
     live_race._http_client = None
+    # Reset auth state so tests start without credentials or cached tokens
+    live_race._token_value = None
+    live_race._token_expires_at = 0.0
     yield
 
 
@@ -341,3 +344,182 @@ def test_empty_state():
     assert state["race_control_log"] == []
     assert state["pit_log"] == []
     assert state["polling_active"] is False
+
+
+# ---------------------------------------------------------------------------
+# Tests: OpenF1 OAuth2 authentication
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_get_auth_headers_no_credentials():
+    """Without credentials, _get_auth_headers returns an empty dict (free tier)."""
+    # Ensure no credentials are set (the fixture already cleared them,
+    # but be explicit about the module-level vars)
+    live_race._OPENF1_USERNAME = None
+    live_race._OPENF1_PASSWORD = None
+
+    headers = await live_race._get_auth_headers()
+    assert headers == {}
+
+    # Restore for other tests
+    live_race._OPENF1_USERNAME = None
+    live_race._OPENF1_PASSWORD = None
+
+
+@pytest.mark.asyncio
+async def test_get_auth_headers_with_cached_token():
+    """With a valid cached token, _get_auth_headers returns the bearer header."""
+    import time
+
+    live_race._OPENF1_USERNAME = "test_user"
+    live_race._OPENF1_PASSWORD = "test_pass"
+    live_race._token_value = "cached_token_abc"
+    # Set expiry far in the future so the token is considered valid
+    live_race._token_expires_at = time.monotonic() + 3000
+
+    headers = await live_race._get_auth_headers()
+    assert headers == {"Authorization": "Bearer cached_token_abc"}
+
+    # Cleanup
+    live_race._OPENF1_USERNAME = None
+    live_race._OPENF1_PASSWORD = None
+
+
+@pytest.mark.asyncio
+async def test_authenticate_success():
+    """_authenticate exchanges credentials for a bearer token."""
+    def token_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={
+            "access_token": "fresh_token_xyz",
+            "token_type": "bearer",
+        })
+
+    live_race._OPENF1_USERNAME = "test_user"
+    live_race._OPENF1_PASSWORD = "test_pass"
+
+    # Inject a mock client so we don't hit the real token endpoint
+    mock_client = httpx.AsyncClient(transport=httpx.MockTransport(token_handler))
+    token = await live_race._authenticate(_auth_client=mock_client)
+
+    assert token == "fresh_token_xyz"
+    assert live_race._token_value == "fresh_token_xyz"
+    assert live_race._token_expires_at > 0
+
+    await mock_client.aclose()
+    live_race._OPENF1_USERNAME = None
+    live_race._OPENF1_PASSWORD = None
+
+
+@pytest.mark.asyncio
+async def test_fetch_openf1_passes_auth_headers():
+    """fetch_openf1 includes the Authorization header when credentials are set."""
+    import time
+
+    # Set up credentials and a cached token
+    live_race._OPENF1_USERNAME = "test_user"
+    live_race._OPENF1_PASSWORD = "test_pass"
+    live_race._token_value = "my_bearer_token"
+    live_race._token_expires_at = time.monotonic() + 3000
+
+    # Track what headers the mock receives
+    received_headers = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        received_headers.update(dict(request.headers))
+        return httpx.Response(200, json=[{"ok": True}])
+
+    live_race._http_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="https://api.openf1.org/v1",
+    )
+
+    result = await live_race.fetch_openf1("/sessions")
+    assert result == [{"ok": True}]
+    assert received_headers.get("authorization") == "Bearer my_bearer_token"
+
+    await live_race.close_client()
+    live_race._OPENF1_USERNAME = None
+    live_race._OPENF1_PASSWORD = None
+
+
+@pytest.mark.asyncio
+async def test_fetch_openf1_no_auth_header_without_credentials():
+    """fetch_openf1 sends no Authorization header when credentials are not set."""
+    live_race._OPENF1_USERNAME = None
+    live_race._OPENF1_PASSWORD = None
+
+    received_headers = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        received_headers.update(dict(request.headers))
+        return httpx.Response(200, json=[{"ok": True}])
+
+    live_race._http_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="https://api.openf1.org/v1",
+    )
+
+    result = await live_race.fetch_openf1("/sessions")
+    assert result == [{"ok": True}]
+    assert "authorization" not in received_headers
+
+    await live_race.close_client()
+
+
+@pytest.mark.asyncio
+async def test_fetch_openf1_401_retries_with_fresh_token():
+    """On 401 with credentials, fetch_openf1 refreshes the token and retries."""
+    import time
+
+    live_race._OPENF1_USERNAME = "test_user"
+    live_race._OPENF1_PASSWORD = "test_pass"
+    # Start with a "valid" stale token — it hasn't expired by our clock, but
+    # the server will reject it with 401 (e.g., token was revoked server-side).
+    live_race._token_value = "stale_token"
+    live_race._token_expires_at = time.monotonic() + 3000
+
+    call_count = 0
+
+    def data_handler(request: httpx.Request) -> httpx.Response:
+        """First call returns 401, second (after token refresh) returns 200."""
+        nonlocal call_count
+        call_count += 1
+        auth = request.headers.get("authorization", "")
+        if "fresh_token" in auth:
+            return httpx.Response(200, json=[{"retried": True}])
+        return httpx.Response(401, json={"error": "unauthorized"})
+
+    live_race._http_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(data_handler),
+        base_url="https://api.openf1.org/v1",
+    )
+
+    # Mock the token endpoint to return a fresh token
+    def token_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={
+            "access_token": "fresh_token_after_401",
+            "token_type": "bearer",
+        })
+
+    mock_auth_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(token_handler),
+    )
+
+    # Monkey-patch _authenticate to use our mock auth client
+    original_authenticate = live_race._authenticate
+
+    async def patched_authenticate(_auth_client=None):
+        return await original_authenticate(_auth_client=mock_auth_client)
+
+    live_race._authenticate = patched_authenticate
+
+    result = await live_race.fetch_openf1("/sessions")
+    assert result == [{"retried": True}]
+    # Should have made 2 data calls: first 401, then retry with fresh token
+    assert call_count == 2
+
+    await live_race.close_client()
+    await mock_auth_client.aclose()
+    live_race._authenticate = original_authenticate
+    live_race._OPENF1_USERNAME = None
+    live_race._OPENF1_PASSWORD = None

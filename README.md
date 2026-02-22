@@ -83,6 +83,19 @@ docker run -d --name f1-strat -p 3000:80 -v f1_cache:/app/backend/.fastf1_cache 
 open http://localhost:3000
 ```
 
+### OpenF1 Sponsor Tier (optional)
+
+Live race tracking works on the free OpenF1 tier (historical data, 8-second polling). For real-time data during active sessions, sign up for the [OpenF1 sponsor tier](https://openf1.org) and pass your credentials as environment variables:
+
+```bash
+docker run -d --name f1-strat -p 3000:80 \
+  -e OPENF1_USERNAME=your_user \
+  -e OPENF1_PASSWORD=your_pass \
+  -v f1_cache:/app/backend/.fastf1_cache f1-strat
+```
+
+With credentials set, the backend exchanges them for a bearer token (valid 1 hour, auto-refreshed) and polls at 4-second intervals instead of 8. If authentication fails, it falls back to the free tier automatically — wrong credentials won't crash anything.
+
 ## Local Development
 
 ### Backend
@@ -162,7 +175,7 @@ f1_strat/
 │   └── tests/
 │       ├── test_degradation.py
 │       ├── test_strategy.py
-│       ├── test_live_race.py     # 18 tests with mock OpenF1 fixtures
+│       ├── test_live_race.py     # 24 tests with mock OpenF1 fixtures
 │       ├── test_validation.py
 │       ├── test_session_service.py
 │       └── fixtures/openf1/      # Recorded API responses for tests
@@ -190,7 +203,7 @@ f1_strat/
 The live tracking system polls the [OpenF1 API](https://openf1.org) and pushes state updates to the browser via Server-Sent Events:
 
 ```
-OpenF1 API  →  Backend polling loop (8s intervals)  →  Module-level state dict
+OpenF1 API  →  Backend polling loop (4s sponsor / 8s free)  →  Module-level state dict
                                                             ↓
                                                     Strategy recalculation
                                                     (triggered by pit events
@@ -203,7 +216,7 @@ Browser  ←  SSE (EventSourceResponse)  ←  Full state snapshot + strategy rec
 - **Automatic lifecycle** — Polling starts on first SSE client, stops after 5 minutes with no clients or when the race ends
 - **Mid-race recalculation** — `calculate_remaining()` runs on pit events and safety car changes, using the driver's current compound, tyre age, and stops completed to find optimal strategies for the remaining laps
 - **Coalesced triggers** — Rapid events (e.g., multiple cars pitting on the same lap) are coalesced into a single recalculation to avoid redundant work
-- **Rate limit handling** — 429 responses trigger exponential backoff; 401/403 stops polling
+- **Rate limit handling** — 429 responses trigger exponential backoff; 401/403 attempts one token refresh before stopping polling
 - **Reconnection** — EventSource auto-reconnects; each SSE message is a full snapshot so no data is lost
 - **Keepalive** — Server sends SSE comments every 15s during quiet periods to keep the connection alive through nginx
 

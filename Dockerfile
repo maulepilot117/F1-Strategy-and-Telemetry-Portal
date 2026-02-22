@@ -50,6 +50,14 @@ RUN chmod +x /app/start.sh
 #   → /app/backend/.fastf1_cache
 VOLUME /app/backend/.fastf1_cache
 
+# OpenF1 sponsor tier credentials (optional).  When set, the backend
+# exchanges these for a bearer token to access real-time race data.
+# Without them, everything still works via the free tier (historical only).
+#
+#   docker run -e OPENF1_USERNAME=your_user -e OPENF1_PASSWORD=your_pass ...
+#
+# The env vars are read at runtime by live_race.py — no build-time changes needed.
+
 EXPOSE 80
 
 CMD ["/app/start.sh"]

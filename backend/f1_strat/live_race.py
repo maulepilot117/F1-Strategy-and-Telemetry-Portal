@@ -19,6 +19,8 @@ Key design decisions:
 
 import asyncio
 import logging
+import os
+import time
 from datetime import datetime, timezone
 
 import httpx
@@ -41,6 +43,24 @@ _needs_recalc: bool = False
 # OpenF1 API base URL
 # ---------------------------------------------------------------------------
 _OPENF1_BASE = "https://api.openf1.org/v1"
+
+# ---------------------------------------------------------------------------
+# OpenF1 OAuth2 credentials (sponsor tier)
+# ---------------------------------------------------------------------------
+# Read from environment variables — when not set, all requests go through
+# the free tier as before (no auth headers, historical data only).
+_OPENF1_USERNAME: str | None = os.getenv("OPENF1_USERNAME")
+_OPENF1_PASSWORD: str | None = os.getenv("OPENF1_PASSWORD")
+
+# Cached bearer token and its expiry (monotonic clock, immune to NTP jumps).
+# _token_expires_at starts at 0.0 so the first request triggers authentication.
+_token_value: str | None = None
+_token_expires_at: float = 0.0
+
+# Refresh the token 60 seconds before it actually expires.  This margin
+# prevents the token from expiring between our check and the server receiving
+# the request — especially important over slow connections.
+_TOKEN_REFRESH_MARGIN_S: float = 60.0
 
 # ---------------------------------------------------------------------------
 # Shared HTTP client — lazy-initialized, reused across all polling calls
@@ -67,12 +87,105 @@ async def close_client() -> None:
     """Shutdown hook — close the httpx connection pool.
 
     Called by FastAPI's shutdown event handler in api.py so we don't
-    leak TCP connections when the server stops.
+    leak TCP connections when the server stops.  Also clears any cached
+    auth token so a restart forces re-authentication.
     """
-    global _http_client
+    global _http_client, _token_value, _token_expires_at
     if _http_client is not None:
         await _http_client.aclose()
         _http_client = None
+    _token_value = None
+    _token_expires_at = 0.0
+
+
+# ---------------------------------------------------------------------------
+# OpenF1 OAuth2 token exchange
+# ---------------------------------------------------------------------------
+
+async def _authenticate(
+    _auth_client: httpx.AsyncClient | None = None,
+) -> str | None:
+    """Exchange username/password for a bearer token.
+
+    POSTs credentials to the OpenF1 token endpoint and caches the result.
+    The token is valid for 1 hour; we subtract _TOKEN_REFRESH_MARGIN_S so
+    we refresh before it actually expires.
+
+    Args:
+        _auth_client: Optional injected client for testing.  Production
+                      code leaves this as None to create a fresh client
+                      (the token endpoint is at the API root, not /v1).
+
+    Returns:
+        The bearer token string, or None if authentication failed.
+    """
+    global _token_value, _token_expires_at
+
+    if not _OPENF1_USERNAME or not _OPENF1_PASSWORD:
+        return None
+
+    # Use a separate client for the token endpoint because it lives at the
+    # API root (https://api.openf1.org/token), not under /v1.
+    client = _auth_client or httpx.AsyncClient(timeout=httpx.Timeout(10.0))
+    try:
+        resp = await client.post(
+            "https://api.openf1.org/token",
+            data={"username": _OPENF1_USERNAME, "password": _OPENF1_PASSWORD},
+        )
+
+        if resp.status_code != 200:
+            logger.warning(
+                "OpenF1 token exchange failed (%d) — falling back to free tier",
+                resp.status_code,
+            )
+            _token_value = None
+            _token_expires_at = 0.0
+            return None
+
+        body = resp.json()
+        _token_value = body.get("access_token")
+        # Token is valid for 1 hour (3600s).  Subtract the refresh margin
+        # so we re-authenticate before the server rejects us.
+        _token_expires_at = time.monotonic() + 3600 - _TOKEN_REFRESH_MARGIN_S
+        logger.info("OpenF1 authenticated — token cached for ~59 minutes")
+        return _token_value
+
+    except Exception as e:
+        logger.warning("OpenF1 token exchange error: %s — falling back to free tier", e)
+        _token_value = None
+        _token_expires_at = 0.0
+        return None
+    finally:
+        # Only close the client if we created it (don't close injected mocks)
+        if _auth_client is None:
+            await client.aclose()
+
+
+async def _get_auth_headers() -> dict[str, str]:
+    """Return auth headers for an OpenF1 API request.
+
+    - No credentials configured → returns {} (free tier, no behavior change)
+    - Valid cached token → returns {"Authorization": "Bearer <token>"}
+    - Expired/missing token → calls _authenticate() first, then returns header
+
+    Called per-request (not baked into the httpx client) because tokens
+    expire hourly and we don't want to tear down the connection pool.
+    """
+    if not _OPENF1_USERNAME or not _OPENF1_PASSWORD:
+        # Free tier — no auth needed
+        return {}
+
+    # Check if we have a valid cached token
+    if _token_value and time.monotonic() < _token_expires_at:
+        return {"Authorization": f"Bearer {_token_value}"}
+
+    # Token missing or expired — authenticate
+    token = await _authenticate()
+    if token:
+        return {"Authorization": f"Bearer {token}"}
+
+    # Auth failed — fall back to free tier (no header)
+    return {}
 
 
 # ---------------------------------------------------------------------------
@@ -97,14 +210,16 @@ async def fetch_openf1(endpoint: str, params: dict | None = None) -> list[dict]:
 
     Handles:
         - 429 (rate limit): respects Retry-After, backs off progressively
-        - 401/403 (auth): stops polling entirely
+        - 401/403 (auth): one token refresh + retry, then stops polling
         - 500/timeout: logs warning, returns empty list (keeps last state)
     """
-    global _backoff_seconds
+    global _backoff_seconds, _token_value, _token_expires_at
 
     client = await _get_client()
+    headers = await _get_auth_headers()
+
     try:
-        resp = await client.get(endpoint, params=params)
+        resp = await client.get(endpoint, params=params, headers=headers)
 
         if resp.status_code == 429:
             # Rate limited — back off progressively
@@ -116,7 +231,26 @@ async def fetch_openf1(endpoint: str, params: dict | None = None) -> list[dict]:
             return []
 
         if resp.status_code in (401, 403):
-            # Auth error — stop polling, don't retry
+            if _OPENF1_USERNAME and _OPENF1_PASSWORD:
+                # Credentials are configured — token may have expired mid-session.
+                # Clear the cached token and try once with a fresh one.
+                logger.warning(
+                    "OpenF1 %d with credentials — refreshing token and retrying",
+                    resp.status_code,
+                )
+                _token_value = None
+                _token_expires_at = 0.0
+                fresh_headers = await _get_auth_headers()
+                if fresh_headers:
+                    retry_resp = await client.get(
+                        endpoint, params=params, headers=fresh_headers,
+                    )
+                    if retry_resp.status_code < 400:
+                        _backoff_seconds = 0.0
+                        retry_resp.raise_for_status()
+                        return retry_resp.json()
+
+            # Either no credentials, or retry also failed — stop polling
             logger.error("OpenF1 auth error (%d) — stopping polling", resp.status_code)
             await stop_polling()
             return []
@@ -532,9 +666,10 @@ async def start_polling(
 async def _poll_loop(session_key: int) -> None:
     """The actual polling loop — runs until stopped, race ends, or no clients.
 
-    Polls each endpoint in round-robin order with ~8s between calls.
-    Total cycle time for all 5 endpoints: ~8 seconds (each endpoint polled
-    sequentially within one cycle, then wait for the remainder of 8s).
+    Polls each endpoint in round-robin order.  The cycle interval depends
+    on whether sponsor credentials are configured:
+      - Sponsor tier (credentials set): ~4s cycles for near-real-time updates
+      - Free tier (no credentials):     ~8s cycles to stay within rate limits
     """
     # The 5 endpoints to poll, in order
     endpoints = [
@@ -624,9 +759,11 @@ async def _poll_loop(session_key: int) -> None:
         else:
             idle_since = None
 
-        # Wait for the remainder of 8 seconds (the poll cycle target)
+        # Wait for the remainder of the poll cycle.  Sponsor tier gets
+        # faster updates (4s) since they have higher rate limits.
+        cycle_target = 4.0 if (_OPENF1_USERNAME and _OPENF1_PASSWORD) else 8.0
         elapsed = asyncio.get_event_loop().time() - cycle_start
-        sleep_time = max(0, 8.0 - elapsed)
+        sleep_time = max(0, cycle_target - elapsed)
         await asyncio.sleep(sleep_time)
 
     _race_state["connected_to_openf1"] = False
