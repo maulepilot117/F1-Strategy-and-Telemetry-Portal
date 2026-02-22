@@ -253,7 +253,7 @@ class ValidationService:
         year: int,
         grand_prix,
         race_laps: int,
-        pit_stop_loss_s: float = 22.0,
+        pit_stop_loss_s: float | None = None,
     ) -> dict:
         """Run the strategy engine for a given race.
 
@@ -273,7 +273,9 @@ class ValidationService:
         Returns:
             The full strategy engine output dict.
         """
-        # Try to get actual pit stop loss from race data
+        # Try to get actual pit stop loss from race data.
+        # If no race data exists (future race), pit_stop_loss_s stays None
+        # and the strategy engine auto-selects a circuit-specific value.
         race_info = self._session_service.get_race_info(year, grand_prix)
         actual_pit_loss = pit_stop_loss_s
         if race_info and race_info.get("avg_pit_stop_loss_s") is not None:

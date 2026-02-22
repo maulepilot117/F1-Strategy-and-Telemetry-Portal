@@ -828,13 +828,13 @@ class TestPositionLossMath:
         one_stop = engine._simulate_race(
             ("MEDIUM", "HARD"), [30, 36], 80.0,
             _flat_to_coeffs({"MEDIUM": 0.08, "HARD": 0.04}), 0.07, 22.0, 66,
-            tyre_warmup_loss_s=1.5, position_loss_s=3.0,
+            tyre_warmup_loss_s=1.0, position_loss_s=3.0,
         )
         two_stop = engine._simulate_race(
             ("SOFT", "MEDIUM", "HARD"), [15, 25, 26], 80.0,
             _flat_to_coeffs({"SOFT": 0.12, "MEDIUM": 0.08, "HARD": 0.04}),
             0.07, 22.0, 66,
-            tyre_warmup_loss_s=1.5, position_loss_s=3.0,
+            tyre_warmup_loss_s=1.0, position_loss_s=3.0,
         )
         # We don't assert which is faster — just that position loss
         # made the 2-stop relatively more expensive (6s more penalty)

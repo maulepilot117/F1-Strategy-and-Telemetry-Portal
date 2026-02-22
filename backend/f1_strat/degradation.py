@@ -557,6 +557,15 @@ class DegradationService:
         # Only accurate laps (FastF1 checks timing sync)
         filtered = filtered[filtered["IsAccurate"] == True]  # noqa: E712
 
+        # Only keep green-flag laps.  TrackStatus is a concatenation of all
+        # status codes during the lap: "1" = all green, "12" = yellow appeared,
+        # "4" or "14" = safety car, "6" = VSC.  We only want pure green laps
+        # ("1") so that SC/VSC slowdowns don't corrupt our degradation curves.
+        # Our 107% outlier filter catches full SC laps (~50% slower) but misses
+        # VSC laps (~10-15% slower) and SC transition laps.
+        if "TrackStatus" in filtered.columns:
+            filtered = filtered[filtered["TrackStatus"] == "1"]
+
         # Remove steward-deleted laps if the column exists and has data
         if "Deleted" in filtered.columns:
             filtered = filtered[filtered["Deleted"] != True]  # noqa: E712

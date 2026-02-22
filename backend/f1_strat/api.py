@@ -144,13 +144,14 @@ def get_strategy(
     race_laps: int = Query(
         description="Total number of laps in the race (e.g., 66 for Spain).",
     ),
-    pit_stop_loss: float = Query(
-        default=22.0,
+    pit_stop_loss: float | None = Query(
+        default=None,
         ge=15.0,
         le=35.0,
         description=(
             "Seconds lost per pit stop (pit entry + stop + exit vs staying "
-            "on track). ~22s is average; Monaco ~25s, Monza ~20s."
+            "on track). When omitted, auto-selects a circuit-specific value "
+            "(e.g., Austria 17s, Singapore 27s). Default ~22s."
         ),
     ),
     fuel_correction: float = Query(
@@ -299,9 +300,12 @@ class StrategyRequest(BaseModel):
     circuit (e.g., 66 for Spain, 78 for Monaco).
     """
     race_laps: int = Field(ge=10, le=100, description="Total laps in the race.")
-    pit_stop_loss: float = Field(
-        default=22.0, ge=15.0, le=35.0,
-        description="Seconds lost per pit stop.",
+    pit_stop_loss: float | None = Field(
+        default=None, ge=15.0, le=35.0,
+        description=(
+            "Seconds lost per pit stop. When null/omitted, auto-selects "
+            "a circuit-specific value (e.g., Austria 17s, Singapore 27s)."
+        ),
     )
     fuel_correction: float = Field(
         default=0.07, ge=0.0, le=0.5,

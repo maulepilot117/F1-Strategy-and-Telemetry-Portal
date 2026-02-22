@@ -187,6 +187,50 @@ _CONDITION_OFFSETS = {
     "wet": 7.0,             # Full wets ~7s slower than slicks
 }
 
+# Per-circuit pit stop time loss (seconds).
+# Pit lane times vary significantly: Austria's short pit lane (~17s)
+# vs Singapore's long one (~27s).  Getting this right shifts 1-stop vs
+# 2-stop decisions at extreme circuits.
+# Sources: TUMFTM race-simulation (2019), Motorsinside (2023 analysis).
+# Keys are FastF1 EventName values (same format as _TYRE_RULES).
+_PIT_LOSS_BY_EVENT: dict[str, float] = {
+    # Street circuits
+    "Monaco Grand Prix":              19.0,
+    "Singapore Grand Prix":           27.0,
+    "Azerbaijan Grand Prix":          20.0,
+    "Saudi Arabian Grand Prix":       22.0,
+    "Las Vegas Grand Prix":           22.0,
+    "Miami Grand Prix":               22.0,
+    # Traditional circuits
+    "Australian Grand Prix":          20.0,
+    "Bahrain Grand Prix":             23.0,
+    "Japanese Grand Prix":            22.0,
+    "Chinese Grand Prix":             22.0,
+    "Emilia Romagna Grand Prix":      22.0,
+    "Spanish Grand Prix":             21.0,
+    "Canadian Grand Prix":            19.0,
+    "Austrian Grand Prix":            17.0,
+    "British Grand Prix":             20.0,
+    "Hungarian Grand Prix":           20.0,
+    "Belgian Grand Prix":             19.0,
+    "Dutch Grand Prix":               20.0,
+    "Italian Grand Prix":             23.0,
+    "United States Grand Prix":       20.0,
+    "Mexico City Grand Prix":         21.0,
+    "São Paulo Grand Prix":           21.0,
+    "Qatar Grand Prix":               24.0,
+    "Abu Dhabi Grand Prix":           22.0,
+}
+_DEFAULT_PIT_LOSS_S = 22.0
+
+
+def get_pit_loss(event_name: str) -> float:
+    """Look up the pit stop time loss for a circuit.
+
+    Returns the circuit-specific value if known, otherwise the default 22.0s.
+    """
+    return _PIT_LOSS_BY_EVENT.get(event_name, _DEFAULT_PIT_LOSS_S)
+
 
 # ---------------------------------------------------------------------------
 # Weather window helpers
@@ -336,7 +380,7 @@ class StrategyEngine:
         year: int,
         grand_prix: str | int,
         race_laps: int,
-        pit_stop_loss_s: float = 22.0,
+        pit_stop_loss_s: float | None = None,
         fuel_correction_s: float = 0.055,
         conditions: str = "dry",
         intermediate_deg_rate: float = 0.12,
@@ -344,7 +388,7 @@ class StrategyEngine:
         weather_windows: list[dict] | None = None,
         max_stops: int = 3,
         min_stint_laps: int = _MIN_STINT_LAPS,
-        tyre_warmup_loss_s: float = 1.5,
+        tyre_warmup_loss_s: float = 1.0,
         position_loss_s: float = 3.0,
         starting_compound: str | None = None,
         deg_scaling: float = 0.85,
@@ -369,7 +413,9 @@ class StrategyEngine:
             grand_prix: GP name ('Spain') or round number.
             race_laps: Total number of race laps.
             pit_stop_loss_s: Time lost per pit stop in seconds.
-                ~22s is average; Monaco ~25s, Monza ~20s.
+                When None (default), auto-resolves to a circuit-specific
+                value from _PIT_LOSS_BY_EVENT (e.g., Austria 17s,
+                Singapore 27s).  Pass a float to override.
             fuel_correction_s: Seconds per lap the car gets faster as
                 fuel burns off.  Default 0.055 matches community consensus
                 (~0.03 s/kg × ~1.8 kg/lap).
@@ -392,7 +438,8 @@ class StrategyEngine:
                 space.
             tyre_warmup_loss_s: Extra seconds lost on the first lap of
                 each stint after a pit stop, due to cold tyres needing
-                ~1 lap to reach operating temperature.  Default 1.5s.
+                ~1 lap to reach operating temperature.  Default 1.0s
+                (aligned with TUMFTM race-simulation research).
                 This is on top of pit_stop_loss_s and makes additional
                 pit stops slightly more expensive.
             position_loss_s: Seconds of escalating penalty per pit stop
@@ -420,6 +467,10 @@ class StrategyEngine:
             year, grand_prix, fuel_correction_s
         )
         event_name = deg_data["event_name"]
+
+        # Use circuit-specific pit loss if the caller didn't override
+        if pit_stop_loss_s is None:
+            pit_stop_loss_s = get_pit_loss(event_name)
 
         # -- Mixed weather path: delegate to the weather-aware engine ------
         if weather_windows is not None:
@@ -1408,10 +1459,10 @@ class StrategyEngine:
                     lap_time -= _TRACK_POSITION_PACE_S * softness
 
                 # Cold-tyre warm-up penalty: first lap of each stint after
-                # the first.  New tyres are ~1-2s slower on their first lap
+                # the first.  New tyres are ~1s slower on their first lap
                 # because they haven't reached operating temperature yet.
-                # This adds a realistic cost to each pit stop beyond just
-                # the pit lane time loss.
+                # Default 1.0s (TUMFTM research).  This adds a realistic
+                # cost to each pit stop beyond just the pit lane time loss.
                 if stint_idx > 0 and tyre_age == 1:
                     lap_time += tyre_warmup_loss_s
 
