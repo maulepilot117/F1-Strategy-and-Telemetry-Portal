@@ -1,4 +1,7 @@
 fastf1>=3.4
 fastapi
 uvicorn[standard]
+httpx>=0.27
+sse-starlette>=2.0
 pytest
+pytest-asyncio

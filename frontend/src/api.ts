@@ -7,6 +7,8 @@ import type {
   DegradationResponse,
   StrategyResponse,
   StrategyRequest,
+  LiveStatusResponse,
+  LiveDriversResponse,
 } from "./types";
 
 // In Docker, the empty string means "same host that served the page" (nginx on port 80).
@@ -73,5 +75,56 @@ export async function fetchWeatherStrategy(
     },
   );
   if (!res.ok) throw new Error(`Weather strategy fetch failed: ${res.statusText}`);
+  return res.json();
+}
+
+// ---------------------------------------------------------------------------
+// Live race tracking endpoints
+// ---------------------------------------------------------------------------
+
+/** Check if a race session is available for live tracking.
+ *
+ * Resolves the year + GP to an OpenF1 session_key and returns
+ * whether polling is already active.
+ */
+export async function fetchLiveStatus(
+  year: number,
+  grandPrix: string,
+  sessionType: string = "Race",
+): Promise<LiveStatusResponse> {
+  const params = new URLSearchParams({ session_type: sessionType });
+  const res = await fetch(
+    `${BASE}/api/live/status/${year}/${encodeURIComponent(grandPrix)}?${params}`,
+  );
+  if (!res.ok) throw new Error(`Live status fetch failed: ${res.statusText}`);
+  return res.json();
+}
+
+/** Get teams and drivers for the team selector dropdown. */
+export async function fetchLiveDrivers(
+  year: number,
+  grandPrix: string,
+): Promise<LiveDriversResponse> {
+  const res = await fetch(
+    `${BASE}/api/live/drivers/${year}/${encodeURIComponent(grandPrix)}`,
+  );
+  if (!res.ok) throw new Error(`Live drivers fetch failed: ${res.statusText}`);
+  return res.json();
+}
+
+/** Start live race tracking (polling OpenF1) for a session.
+ *
+ * Idempotent — if already polling the same session, returns current status.
+ */
+export async function startLiveTracking(
+  sessionKey: number,
+  totalLaps: number,
+): Promise<{ status: string; session_key: number; total_laps: number; drivers: number }> {
+  const params = new URLSearchParams({ total_laps: totalLaps.toString() });
+  const res = await fetch(
+    `${BASE}/api/live/start/${sessionKey}?${params}`,
+    { method: "POST" },
+  );
+  if (!res.ok) throw new Error(`Start tracking failed: ${res.statusText}`);
   return res.json();
 }

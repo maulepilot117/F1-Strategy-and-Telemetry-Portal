@@ -1,0 +1,246 @@
+/* Live race dashboard layout — two-driver side-by-side with race info header. */
+
+.container {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+/* ---- Race selector row: Year + GP + Team dropdowns + Go button ---- */
+
+.selectorRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 12px;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.field label {
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-secondary);
+}
+
+.field select {
+  min-width: 200px;
+}
+
+.goButton {
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  border-radius: 6px;
+  padding: 9px 24px;
+  font-size: 0.9rem;
+  font-weight: 600;
+  font-family: var(--font-family);
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.goButton:hover:not(:disabled) {
+  background: var(--accent-hover);
+}
+
+.goButton:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* ---- Status bar: SC state / lap counter / connection indicator ---- */
+
+.statusBar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 16px;
+  font-size: 0.85rem;
+}
+
+.scBadge {
+  font-weight: 700;
+  text-transform: uppercase;
+  padding: 2px 10px;
+  border-radius: 4px;
+  font-size: 0.8rem;
+}
+
+/* Yellow background when SC/VSC is active, green when clear */
+.scActive {
+  background: #FFD700;
+  color: #000;
+}
+
+.scClear {
+  background: #00CC00;
+  color: #000;
+}
+
+.lapCounter {
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.connectionDot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+  margin-right: 4px;
+}
+
+.connected {
+  background: #00CC00;
+}
+
+.disconnected {
+  background: #FF3333;
+}
+
+.connectionStatus {
+  display: flex;
+  align-items: center;
+  margin-left: auto;
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+}
+
+/* ---- Driver cards: side-by-side ---- */
+
+.driverGrid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+}
+
+/* On narrow screens, stack the driver cards */
+@media (max-width: 640px) {
+  .driverGrid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.driverCard {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 16px;
+}
+
+/* Colored top border using the team colour */
+.driverCardHeader {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 12px;
+  padding-bottom: 8px;
+  border-bottom: 2px solid var(--border);
+}
+
+.driverAbbr {
+  font-size: 1.2rem;
+  font-weight: 700;
+}
+
+.driverTeam {
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+}
+
+.driverStats {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 0.85rem;
+}
+
+.statRow {
+  display: flex;
+  justify-content: space-between;
+}
+
+.statLabel {
+  color: var(--text-secondary);
+}
+
+.statValue {
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Tyre compound badge — colored per compound */
+.tyreBadge {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: 4px;
+  font-weight: 700;
+  font-size: 0.8rem;
+}
+
+/* ---- Race control log ---- */
+
+.raceControlSection {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 16px;
+}
+
+.sectionTitle {
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-secondary);
+  margin-bottom: 10px;
+}
+
+.logList {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 200px;
+  overflow-y: auto;
+  font-size: 0.82rem;
+}
+
+.logLap {
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+  min-width: 50px;
+  display: inline-block;
+}
+
+.logMessage {
+  color: var(--text-primary);
+}
+
+/* ---- Empty / waiting states ---- */
+
+.emptyState {
+  text-align: center;
+  color: var(--text-secondary);
+  padding: 40px 0;
+  font-style: italic;
+}
+
+.error {
+  background: #2a1515;
+  border: 1px solid #4a2020;
+  border-radius: 8px;
+  padding: 12px 16px;
+  color: #ff6b6b;
+  font-size: 0.85rem;
+}

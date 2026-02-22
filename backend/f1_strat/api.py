@@ -12,14 +12,19 @@ Run the server with:
 Then visit http://localhost:8000/docs to see the interactive API docs.
 """
 
-from fastapi import FastAPI, HTTPException, Query
+import asyncio
+import json
+
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
+from sse_starlette.sse import EventSourceResponse
 
 import fastf1
 
 from f1_strat.cache import setup_cache
 from f1_strat.degradation import DegradationService
+from f1_strat import live_race
 from f1_strat.session_service import SessionService
 from f1_strat.strategy import StrategyEngine
 
@@ -406,3 +411,175 @@ def post_strategy(year: int, grand_prix: str, body: StrategyRequest) -> dict:
     except ValueError as e:
         # Weather window validation errors → 400 Bad Request
         raise HTTPException(status_code=400, detail=str(e))
+
+
+# ---------------------------------------------------------------------------
+# Shutdown handler — clean up the httpx connection pool
+# ---------------------------------------------------------------------------
+
+@app.on_event("shutdown")
+async def shutdown() -> None:
+    """Clean up on server shutdown: stop polling and close the HTTP client."""
+    await live_race.stop_polling()
+    await live_race.close_client()
+
+
+# ---------------------------------------------------------------------------
+# Live race tracking endpoints
+# ---------------------------------------------------------------------------
+
+@app.get("/api/live/status/{year}/{grand_prix}")
+async def get_live_status(
+    year: int,
+    grand_prix: str,
+    session_type: str = Query(default="Race", description="Session type (Race or Sprint)"),
+) -> dict:
+    """Check if a race session is available for live tracking.
+
+    Resolves the year + grand_prix to an OpenF1 session_key by querying
+    the OpenF1 /sessions endpoint.  Also returns total_laps from FastF1
+    and whether polling is already active.
+
+    **Example:** `/api/live/status/2024/Spain`
+    """
+    # Resolve session_key from OpenF1
+    # OpenF1 uses country_name, but FastF1 event names are like "Spanish Grand Prix".
+    # Try the grand_prix value directly as country_name first.
+    session_key = await live_race.resolve_session_key(year, grand_prix, session_type)
+
+    # Get total laps from FastF1's race data (if available)
+    total_laps = None
+    try:
+        race_info = _session_service.get_race_info(year, grand_prix)
+        if race_info:
+            total_laps = race_info.get("total_laps")
+    except Exception:
+        pass
+
+    return {
+        "session_key": session_key,
+        "total_laps": total_laps,
+        "polling_active": live_race._race_state.get("polling_active", False),
+        "current_session_key": live_race._race_state.get("session_key"),
+    }
+
+
+@app.post("/api/live/start/{session_key}")
+async def start_live_tracking(
+    session_key: int,
+    total_laps: int = Query(description="Total laps in the race"),
+) -> dict:
+    """Start polling OpenF1 for live race data.
+
+    Idempotent — if already polling the same session, returns current status
+    without restarting.  If polling a different session, stops the old one
+    and starts the new one.
+
+    **Example:** `POST /api/live/start/9539?total_laps=66`
+    """
+    await live_race.start_polling(session_key, total_laps)
+
+    return {
+        "status": "polling",
+        "session_key": session_key,
+        "total_laps": total_laps,
+        "drivers": len(live_race._race_state.get("drivers", {})),
+    }
+
+
+@app.get("/api/live/drivers/{year}/{grand_prix}")
+def get_live_drivers(year: int, grand_prix: str) -> dict:
+    """Get teams and drivers for the team selector dropdown.
+
+    Returns teams grouped with their two drivers, using data from FastF1's
+    session results (same source as the existing qualifying endpoint).
+
+    **Example:** `/api/live/drivers/2024/Spain`
+    """
+    try:
+        # Load any session to get driver/team info (qualifying has the best data)
+        session = fastf1.get_session(year, grand_prix, "Q")
+        session.load(laps=False, telemetry=False, weather=False, messages=False)
+        drivers = _session_service._extract_drivers(session)
+    except Exception:
+        # Fall back to race session if qualifying isn't available
+        try:
+            session = fastf1.get_session(year, grand_prix, "R")
+            session.load(laps=False, telemetry=False, weather=False, messages=False)
+            drivers = _session_service._extract_drivers(session)
+        except Exception as e:
+            raise HTTPException(status_code=404, detail=f"Could not load driver data: {e}")
+
+    # Group drivers by team
+    teams: dict[str, dict] = {}
+    for d in drivers:
+        team_name = d.get("team", "Unknown")
+        if team_name not in teams:
+            teams[team_name] = {
+                "team": team_name,
+                "team_color": d.get("team_color"),
+                "drivers": [],
+            }
+        teams[team_name]["drivers"].append({
+            "number": d.get("number"),
+            "abbreviation": d.get("abbreviation"),
+            "full_name": d.get("full_name"),
+        })
+
+    return {"teams": list(teams.values())}
+
+
+@app.get("/api/live/stream/{session_key}")
+async def live_stream(request: Request, session_key: int) -> EventSourceResponse:
+    """Server-Sent Events stream of full race state snapshots.
+
+    Sends the complete race state as JSON on every update (~every 8 seconds).
+    On initial connect or reconnect, the first event is the current state.
+    Sends a keepalive comment every 15 seconds during quiet periods.
+
+    The frontend uses EventSource to connect — it auto-reconnects on
+    disconnection and every message is a full snapshot, so no state is lost.
+
+    **Example:** `GET /api/live/stream/9539` (use with EventSource, not fetch)
+    """
+    # Verify we're tracking this session
+    if live_race._race_state.get("session_key") != session_key:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Not tracking session {session_key}. Start polling first.",
+        )
+
+    async def event_generator():
+        """Yield SSE events — full state snapshots + keepalive comments."""
+        live_race._sse_client_count += 1
+        last_sent = None
+        keepalive_counter = 0
+
+        try:
+            while True:
+                # Check if client disconnected
+                if await request.is_disconnected():
+                    break
+
+                current = live_race._race_state.get("last_updated")
+
+                if current != last_sent:
+                    # State changed — send full snapshot
+                    last_sent = current
+                    keepalive_counter = 0
+                    yield {
+                        "event": "message",
+                        "data": json.dumps(live_race._race_state, default=str),
+                    }
+                else:
+                    keepalive_counter += 1
+                    # Send keepalive every 15 seconds (15 × 1s sleep)
+                    if keepalive_counter >= 15:
+                        keepalive_counter = 0
+                        yield {"comment": "keepalive"}
+
+                await asyncio.sleep(1)
+        finally:
+            live_race._sse_client_count -= 1
+
+    return EventSourceResponse(event_generator())

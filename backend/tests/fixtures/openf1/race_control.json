@@ -1,0 +1,8 @@
+[
+  {"session_key": 9539, "meeting_key": 1238, "date": "2024-06-23T13:00:00+00:00", "lap_number": 0, "category": "Flag", "flag": "GREEN", "scope": "Track", "message": "GREEN LIGHT - PIT EXIT OPEN", "driver_number": null},
+  {"session_key": 9539, "meeting_key": 1238, "date": "2024-06-23T13:20:00+00:00", "lap_number": 12, "category": "SafetyCar", "flag": null, "scope": "Track", "message": "SAFETY CAR DEPLOYED", "driver_number": null},
+  {"session_key": 9539, "meeting_key": 1238, "date": "2024-06-23T13:25:00+00:00", "lap_number": 15, "category": "SafetyCar", "flag": null, "scope": "Track", "message": "SAFETY CAR IN THIS LAP", "driver_number": null},
+  {"session_key": 9539, "meeting_key": 1238, "date": "2024-06-23T13:26:00+00:00", "lap_number": 16, "category": "Flag", "flag": "GREEN", "scope": "Track", "message": "GREEN FLAG", "driver_number": null},
+  {"session_key": 9539, "meeting_key": 1238, "date": "2024-06-23T13:40:00+00:00", "lap_number": 30, "category": "SafetyCar", "flag": null, "scope": "Track", "message": "VIRTUAL SAFETY CAR DEPLOYED", "driver_number": null},
+  {"session_key": 9539, "meeting_key": 1238, "date": "2024-06-23T13:43:00+00:00", "lap_number": 32, "category": "SafetyCar", "flag": null, "scope": "Track", "message": "VSC ENDING", "driver_number": null}
+]
