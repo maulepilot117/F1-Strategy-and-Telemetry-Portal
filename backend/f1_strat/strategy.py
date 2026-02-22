@@ -122,10 +122,12 @@ _LAST_STINT_SOFT_PENALTY_S = 1.5
 # HARD runs are high-fuel race sims (slow baseline).  At 0.03 s/kg, a
 # 25 kg fuel difference alone accounts for ~0.75s of the apparent offset.
 #
-# Scaling by 0.4 brings practice offsets in line with community consensus
-# (~MEDIUM +0.5s, HARD +1.0s vs SOFT).
+# Currently disabled (0.0) because even small scaling values (0.05-0.4)
+# consistently hurt compound set match accuracy by flipping boundary-race
+# predictions.  The infrastructure is kept so offsets can be re-enabled
+# if a better scaling approach is found.  See MEMORY.md for full results.
 # ---------------------------------------------------------------------------
-_COMPOUND_OFFSET_SCALING = 0.4
+_COMPOUND_OFFSET_SCALING = 0.0
 
 
 # ---------------------------------------------------------------------------
