@@ -73,6 +73,15 @@ class DegradationService:
         # Its __init__ also calls setup_cache(), which is idempotent.
         self._session_service = SessionService()
 
+        # In-memory cache for analyze() results.  Keyed by
+        # (year, grand_prix, fuel_correction_s, history_years).
+        # Once computed, degradation analysis is immutable for a given
+        # weekend — the same practice data produces the same curves.
+        # This eliminates redundant work between /api/degradation and
+        # /api/strategy calls, and turns 20 live-race recalculations
+        # into 1 real computation + 19 cache hits.
+        self._analysis_cache: dict[tuple, dict] = {}
+
     def _get_race_track_temp(
         self, year: int, grand_prix: str | int
     ) -> float | None:
@@ -121,6 +130,33 @@ class DegradationService:
         return float(np.exp(-(diff ** 2) / (2 * _TEMP_WEIGHT_SIGMA_C ** 2)))
 
     def analyze(
+        self,
+        year: int,
+        grand_prix: str | int,
+        fuel_correction_s: float = 0.055,
+        history_years: int = _DEFAULT_HISTORY_YEARS,
+    ) -> dict:
+        """Calculate tyre degradation curves for a race weekend (cached).
+
+        Returns cached results when available.  The cache key is
+        (year, grand_prix, fuel_correction_s, history_years) — practice
+        data for a given weekend is immutable, so the result never changes.
+
+        See _analyze_uncached() for the full pipeline description.
+        """
+        cache_key = (year, grand_prix, fuel_correction_s, history_years)
+        if cache_key in self._analysis_cache:
+            logger.debug("Degradation cache hit for %s", cache_key)
+            return self._analysis_cache[cache_key]
+
+        result = self._analyze_uncached(
+            year, grand_prix, fuel_correction_s, history_years,
+        )
+        self._analysis_cache[cache_key] = result
+        logger.info("Degradation cached for %s", cache_key)
+        return result
+
+    def _analyze_uncached(
         self,
         year: int,
         grand_prix: str | int,

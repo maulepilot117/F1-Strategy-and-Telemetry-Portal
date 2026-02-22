@@ -30,6 +30,13 @@ class SessionService:
     def __init__(self):
         setup_cache()
 
+        # In-memory cache for get_base_lap_time() results.  Keyed by
+        # (year, grand_prix).  Base lap time loads FP1/FP2/FP3/Sprint
+        # sessions to find the fastest clean lap — caching avoids
+        # redundant session loads during live recalculation (20 drivers
+        # × 4 sessions = 80 loads per pit event without caching).
+        self._base_lap_cache: dict[tuple, float] = {}
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -305,6 +312,9 @@ class SessionService:
         baseline lap time for strategy simulation — the time a car would
         do on fresh tyres with no degradation.
 
+        Results are cached per (year, grand_prix) — practice data is
+        immutable for a given weekend, so the fastest lap never changes.
+
         Args:
             year: Season year.
             grand_prix: GP name or round number.
@@ -315,6 +325,11 @@ class SessionService:
         Raises:
             ValueError: If no valid laps found in any practice session.
         """
+        cache_key = (year, grand_prix)
+        if cache_key in self._base_lap_cache:
+            logger.debug("Base lap time cache hit for %s", cache_key)
+            return self._base_lap_cache[cache_key]
+
         fastest = None
 
         # Include Sprint ("S") because drivers push harder in racing than
@@ -354,7 +369,10 @@ class SessionService:
                 f"No valid practice laps found for {year} {grand_prix}"
             )
 
-        return round(fastest, 3)
+        result = round(fastest, 3)
+        self._base_lap_cache[cache_key] = result
+        logger.info("Base lap time cached for %s: %.3fs", cache_key, result)
+        return result
 
     def get_q2_compounds(self, year: int, grand_prix: str | int) -> dict:
         """Extract Q2 fastest lap compound for top-10 qualifiers.

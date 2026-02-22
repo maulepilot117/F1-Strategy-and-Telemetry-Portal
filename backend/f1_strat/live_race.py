@@ -301,6 +301,11 @@ _race_state: dict = _empty_state()
 # Track connected SSE clients so we can auto-stop polling
 _sse_client_count: int = 0
 
+# Event that wakes SSE generators immediately when state changes, instead
+# of the generators polling every 1 second.  Set (then cleared) at the end
+# of each polling cycle so all waiting generators wake up at once.
+_state_changed: asyncio.Event = asyncio.Event()
+
 # ---------------------------------------------------------------------------
 # State update functions — called by the polling loop
 # ---------------------------------------------------------------------------
@@ -539,6 +544,12 @@ async def _maybe_recalculate() -> None:
                 )
 
         _race_state["strategies"] = strategies_by_driver
+        _race_state["last_updated"] = datetime.now(timezone.utc).isoformat()
+        # Wake SSE clients so they get the new strategies immediately.
+        # This is important when recalculation runs as a background task
+        # (create_task) — without this, clients would wait up to 15s.
+        _state_changed.set()
+        _state_changed.clear()
         logger.info(
             "Recalculated strategies for %d drivers (lap %d/%d)",
             len(strategies_by_driver), current_lap, total_laps,
@@ -666,16 +677,24 @@ async def start_polling(
 async def _poll_loop(session_key: int) -> None:
     """The actual polling loop — runs until stopped, race ends, or no clients.
 
-    Polls each endpoint in round-robin order.  The cycle interval depends
-    on whether sponsor credentials are configured:
+    Fetches non-stint endpoints concurrently with asyncio.gather(), then
+    does a single full stints fetch (needed for lap_end values that
+    incremental fetching doesn't provide).
+
+    Strategy recalculation runs as a background task (create_task) so it
+    never blocks the polling loop — SSE clients see position/tyre updates
+    immediately while strategies compute in the background.
+
+    The cycle interval depends on whether sponsor credentials are configured:
       - Sponsor tier (credentials set): ~4s cycles for near-real-time updates
       - Free tier (no credentials):     ~8s cycles to stay within rate limits
     """
-    # The 5 endpoints to poll, in order
+    # Non-stint endpoints to poll concurrently.  Stints are fetched
+    # separately as a full (non-incremental) fetch because we need
+    # lap_end values that only appear when the stint is complete.
     endpoints = [
         ("race_control", "/race_control", _update_from_race_control),
         ("pit", "/pit", _update_from_pits),
-        ("stints", "/stints", _update_from_stints),
         ("position", "/position", _update_from_positions),
         ("intervals", "/intervals", _update_from_intervals),
     ]
@@ -696,23 +715,33 @@ async def _poll_loop(session_key: int) -> None:
         sc_before = _race_state["is_safety_car"]
         pit_count_before = len(_race_state["pit_log"])
 
-        # Poll each endpoint
-        for key, path, updater in endpoints:
-            if not _race_state["polling_active"]:
-                break
-
+        # Fetch all non-stint endpoints concurrently — each endpoint is
+        # independent, so there's no reason to wait for one before starting
+        # the next.  This turns 4 × ~500ms sequential into 1 × ~500ms.
+        async def _fetch_endpoint(key, path):
             params = _make_since_params(session_key, key)
             data = await fetch_openf1(path, params)
+            return key, data
+
+        results = await asyncio.gather(
+            *[_fetch_endpoint(key, path) for key, path, _ in endpoints]
+        )
+
+        # Apply results — updaters are sync functions, safe to call here
+        updater_map = {key: updater for key, _, updater in endpoints}
+        for key, data in results:
             _track_latest_timestamp(data, key)
-
             if data:
-                updater(data)
+                updater_map[key](data)
 
-        # Update current lap from stint data (stints have lap_start/lap_end)
-        # We need to re-fetch stints without the since filter to get lap_end
+        # Single full stints fetch — provides lap_end values for current
+        # lap detection AND compound/tyre data for driver state.  This
+        # replaces both the incremental stint fetch (removed from the
+        # concurrent batch above) and the separate full re-fetch that
+        # previously happened after the loop.
         all_stints = await fetch_openf1("/stints", {"session_key": session_key})
         if all_stints:
-            # Find the max lap_end across all drivers
+            # Find the max lap_end across all drivers for current lap
             max_lap = 0
             for s in all_stints:
                 lap_end = s.get("lap_end")
@@ -721,22 +750,26 @@ async def _poll_loop(session_key: int) -> None:
             if max_lap > _race_state["current_lap"]:
                 _race_state["current_lap"] = max_lap
 
-            # Also update tyre age based on current lap
+            # Update compound and tyre age for all drivers
             _update_from_stints(all_stints)
 
-        # Mark the state as updated
+        # Mark the state as updated and wake SSE clients immediately
         _race_state["last_updated"] = datetime.now(timezone.utc).isoformat()
+        _state_changed.set()
+        _state_changed.clear()
 
         # Trigger strategy recalculation if something strategy-relevant changed:
         # 1. New pit events (a driver pitted → different compound/tyre age)
         # 2. SC status change (SC deployed or ended → affects optimal strategy)
         # 3. First cycle (no strategies calculated yet)
+        # Runs as a background task so the polling loop continues immediately.
+        # The _is_calculating / _needs_recalc flags prevent overlapping runs.
         sc_changed = _race_state["is_safety_car"] != sc_before
         new_pits = len(_race_state["pit_log"]) > pit_count_before
         no_strategies_yet = not _race_state.get("strategies")
 
         if (sc_changed or new_pits or no_strategies_yet) and _race_state["current_lap"] > 0:
-            await _maybe_recalculate()
+            asyncio.create_task(_maybe_recalculate())
 
         # Check if race is finished
         if (
@@ -795,8 +828,10 @@ async def race_state_generator(disconnect_event: asyncio.Event) -> None:
     """Async generator that yields full _race_state snapshots as SSE data.
 
     Yields the current state on connect, then re-yields whenever
-    last_updated changes.  Sends a keepalive comment every 15 seconds
-    during quiet periods to prevent proxy/browser connection drops.
+    last_updated changes.  Uses _state_changed Event to wake instantly
+    when the polling loop updates state, instead of polling every 1 second.
+    Falls back to a 15-second timeout for keepalive comments to prevent
+    proxy/browser connection drops.
 
     Args:
         disconnect_event: Set when the client disconnects (checked each loop).
@@ -818,14 +853,17 @@ async def race_state_generator(disconnect_event: asyncio.Event) -> None:
                 # State changed — yield a full snapshot
                 last_sent = current
                 yield _race_state
-            else:
-                # No change — yield a keepalive comment (sse-starlette
-                # handles the ": keepalive\n\n" formatting when we yield None
-                # with event="keepalive")
-                pass
 
-            # Check every 1 second for state changes
-            await asyncio.sleep(1)
+            # Wait for the next state change or 15s timeout (keepalive).
+            # _state_changed is set/cleared by the polling loop each cycle,
+            # so this wakes within milliseconds of a state update instead
+            # of the old 1-second polling delay.
+            try:
+                await asyncio.wait_for(_state_changed.wait(), timeout=15.0)
+            except asyncio.TimeoutError:
+                # 15s without a state change — this is fine, just loop
+                # back and the next iteration will check for disconnect
+                pass
 
     finally:
         _sse_client_count -= 1

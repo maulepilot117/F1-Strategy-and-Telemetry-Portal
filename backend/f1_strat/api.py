@@ -15,7 +15,7 @@ Then visit http://localhost:8000/docs to see the interactive API docs.
 import asyncio
 import json
 
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
@@ -56,7 +56,7 @@ setup_cache()
 
 
 @app.get("/api/schedule/{year}")
-def get_schedule(year: int) -> list[dict]:
+def get_schedule(year: int, response: Response) -> list[dict]:
     """Get the F1 race schedule for a given season.
 
     Returns a list of events with their names, locations, and dates.
@@ -66,6 +66,10 @@ def get_schedule(year: int) -> list[dict]:
 
     **Example:** `/api/schedule/2024` returns all 2024 races.
     """
+    # Schedule data is stable for a season — cache for 24 hours to avoid
+    # redundant backend calls on page refresh and browser navigation.
+    response.headers["Cache-Control"] = "public, max-age=86400"
+
     # get_event_schedule returns a DataFrame of all events in the season
     schedule = fastf1.get_event_schedule(year)
 
@@ -90,6 +94,7 @@ def get_schedule(year: int) -> list[dict]:
 def get_degradation(
     year: int,
     grand_prix: str,
+    response: Response,
     fuel_correction: float = Query(
         default=0.07,
         ge=0.0,
@@ -121,6 +126,9 @@ def get_degradation(
     **Example:** `/api/degradation/2024/Spain` returns the degradation data
     for the 2024 Spanish Grand Prix.
     """
+    # Practice data for a completed weekend doesn't change — cache for 1 hour.
+    response.headers["Cache-Control"] = "public, max-age=3600"
+
     return _degradation_service.analyze(
         year=year,
         grand_prix=grand_prix,
@@ -130,7 +138,7 @@ def get_degradation(
 
 
 @app.get("/api/weather/{year}/{grand_prix}")
-def get_weather(year: int, grand_prix: str) -> dict:
+def get_weather(year: int, grand_prix: str, response: Response) -> dict:
     """Weather summary for all practice sessions.
 
     Returns temperature ranges, humidity, wind, and a 'had_rain' flag
@@ -139,6 +147,9 @@ def get_weather(year: int, grand_prix: str) -> dict:
 
     **Example:** `/api/weather/2024/Spain`
     """
+    # Weather data from completed sessions is static — cache for 1 hour.
+    response.headers["Cache-Control"] = "public, max-age=3600"
+
     return _session_service.get_weather_summary(year=year, grand_prix=grand_prix)
 
 
@@ -556,10 +567,14 @@ async def live_stream(request: Request, session_key: int) -> EventSourceResponse
         )
 
     async def event_generator():
-        """Yield SSE events — full state snapshots + keepalive comments."""
+        """Yield SSE events — full state snapshots + keepalive comments.
+
+        Uses live_race._state_changed Event to wake instantly on state
+        updates instead of polling every 1 second.  Falls back to a
+        15-second timeout for keepalive comments.
+        """
         live_race._sse_client_count += 1
         last_sent = None
-        keepalive_counter = 0
 
         try:
             while True:
@@ -572,19 +587,22 @@ async def live_stream(request: Request, session_key: int) -> EventSourceResponse
                 if current != last_sent:
                     # State changed — send full snapshot
                     last_sent = current
-                    keepalive_counter = 0
                     yield {
                         "event": "message",
                         "data": json.dumps(live_race._race_state, default=str),
                     }
-                else:
-                    keepalive_counter += 1
-                    # Send keepalive every 15 seconds (15 × 1s sleep)
-                    if keepalive_counter >= 15:
-                        keepalive_counter = 0
-                        yield {"comment": "keepalive"}
 
-                await asyncio.sleep(1)
+                # Wait for the next state change or 15s timeout.
+                # _state_changed is set by the polling loop and by
+                # _maybe_recalculate(), so we wake within milliseconds
+                # of any state update.
+                try:
+                    await asyncio.wait_for(
+                        live_race._state_changed.wait(), timeout=15.0,
+                    )
+                except asyncio.TimeoutError:
+                    # 15s without state change — send keepalive
+                    yield {"comment": "keepalive"}
         finally:
             live_race._sse_client_count -= 1
 

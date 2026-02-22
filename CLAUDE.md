@@ -224,6 +224,57 @@ The validation also:
 - Detects likely safety-car-influenced races (consecutive pit stops within 3 laps, or 4+ stops) and reports clean-race metrics separately
 - Tracks compound balance (predicted vs actual SOFT/MEDIUM/HARD usage)
 
+### Performance and caching
+
+The app uses several layers of caching to avoid redundant work.  The most expensive operation is the degradation analysis pipeline (loading 4 practice sessions + 3 years of historical race data + regression fitting).  Without caching, every API call and every live-race driver recalculation repeats this ~5-second pipeline from scratch.
+
+#### In-memory result caches
+
+Two services cache their expensive results in instance-level dicts:
+
+- **`DegradationService._analysis_cache`** — Keyed by `(year, grand_prix, fuel_correction_s, history_years)`.  The `analyze()` method checks this cache first; the actual computation lives in `_analyze_uncached()`.  Practice data for a given weekend is immutable, so cached results never go stale.  This eliminates redundant work between `/api/degradation` and `/api/strategy` calls (both call `analyze()` internally), and turns 20 live-race recalculations into 1 real computation + 19 instant cache hits.
+
+- **`SessionService._base_lap_cache`** — Keyed by `(year, grand_prix)`.  `get_base_lap_time()` loads FP1/FP2/FP3/Sprint to find the fastest clean lap.  During live recalculation, this was called 20 times (once per driver) × 4 sessions = 80 FastF1 session loads per pit event.  With caching: 1 load, then instant hits.
+
+These caches live for the lifetime of the service instances (which are module-level singletons in `api.py`).  They're automatically cleared on server restart.  There is no cache invalidation because practice data doesn't change — if you need to force a refresh, restart the server.
+
+When adding new cached methods, follow the same pattern: check a dict keyed by the method's immutable inputs, compute on miss, store on miss.
+
+#### HTTP Cache-Control headers
+
+Three endpoints set `Cache-Control` response headers so browsers and proxies avoid redundant backend calls on page refresh and navigation:
+
+| Endpoint | `max-age` | Rationale |
+|----------|-----------|-----------|
+| `/api/schedule/{year}` | 86400 (24h) | Race calendar changes at most once per season |
+| `/api/degradation/{year}/{gp}` | 3600 (1h) | Practice data is immutable after the weekend |
+| `/api/weather/{year}/{gp}` | 3600 (1h) | Same — weather samples are recorded, not live |
+
+Strategy and qualifying endpoints are not cached because query parameters vary per user interaction.
+
+#### Live race polling optimizations
+
+The live race polling loop (`_poll_loop()` in `live_race.py`) has four performance optimizations:
+
+1. **Concurrent endpoint fetches** — The 4 non-stint endpoints (race_control, pit, position, intervals) are fetched concurrently with `asyncio.gather()` instead of sequentially.  This turns 4 × ~500ms sequential into 1 × ~500ms concurrent.
+
+2. **Single stints fetch** — Stints are fetched once as a full (non-incremental) request after the concurrent batch.  This single fetch provides both `lap_end` values (needed for current lap detection) and compound/tyre data (needed for driver state).  Previously stints were fetched twice: once incrementally and once as a full re-fetch.
+
+3. **Non-blocking strategy recalculation** — `_maybe_recalculate()` runs via `asyncio.create_task()` instead of `await`, so the polling loop continues immediately.  SSE clients see position and tyre updates without waiting for strategy computation to finish.  The existing `_is_calculating` / `_needs_recalc` coalescing flags prevent overlapping recalculations, so this is safe.
+
+4. **Event-driven SSE delivery** — A module-level `asyncio.Event` (`_state_changed`) is set at the end of each polling cycle and after strategy recalculation.  SSE generators use `asyncio.wait_for(_state_changed.wait(), timeout=15.0)` instead of `asyncio.sleep(1)`, delivering state updates to clients within milliseconds instead of up to 1 second.  The 15-second timeout preserves keepalive behavior.
+
+### Live race tracking architecture
+
+`live_race.py` implements the OpenF1 polling loop and SSE state management.  Key design points:
+
+- **Module-level shared state** — `_race_state` dict is the single source of truth, read by SSE generators and written by the polling loop.  Single uvicorn worker (`--workers 1`) is required because state lives in-process.
+- **Full state snapshots** — SSE sends the complete `_race_state` on every update.  No delta encoding — simpler and resilient to reconnection.
+- **One race at a time** — Appropriate for a single-user fan tool on a home Kubernetes lab.
+- **Polling tiers** — Sponsor credentials (env vars `OPENF1_USERNAME`/`OPENF1_PASSWORD`) enable 4-second cycles; free tier uses 8-second cycles to respect rate limits.
+- **Coalesced recalculation** — Multiple pit events within one cycle produce a single recalculation.  `_is_calculating` prevents overlap; `_needs_recalc` queues a follow-up if a trigger fires during computation.
+- **Auto-stop** — Polling stops automatically when the race finishes (current_lap >= total_laps) or when no SSE clients are connected for 5 minutes.
+
 ### Session types reference
 
 | Code | Session          |
