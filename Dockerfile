@@ -20,8 +20,10 @@ RUN deno task build
 # Python 3.12 (not 3.14) — best wheel support for numpy/scipy/pandas
 FROM python:3.12-slim
 
-# Install nginx and clean up apt cache to keep image smaller
+# Upgrade base packages to pick up security patches (e.g. CVE-2026-0861
+# in libc6/libc-bin), install nginx, then clean up apt cache.
 RUN apt-get update && \
+    apt-get upgrade -y && \
     apt-get install -y --no-install-recommends nginx && \
     rm -rf /var/lib/apt/lists/*
 
