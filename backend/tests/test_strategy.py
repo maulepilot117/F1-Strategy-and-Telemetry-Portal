@@ -208,6 +208,21 @@ def test_rules_non_special_2025():
     assert rules["max_stint_laps"] is None
 
 
+def test_compound_offsets_in_response(strategy_data):
+    """Strategy response should include the compound base pace offsets used."""
+    assert "compound_offsets_used" in strategy_data, (
+        "Expected 'compound_offsets_used' in strategy response"
+    )
+    offsets = strategy_data["compound_offsets_used"]
+    # Should have offsets for at least 2 compounds
+    assert len(offsets) >= 2, f"Expected offsets for 2+ compounds, got {offsets}"
+    # Fastest compound should have offset 0.0
+    assert min(offsets.values()) == 0.0, (
+        f"Fastest compound should have offset 0.0, got {offsets}"
+    )
+    print(f"\n  Compound offsets used: {offsets}")
+
+
 def test_dry_mode_unchanged(strategy_data):
     """Dry mode should still produce the same response shape as before.
 
@@ -1270,3 +1285,113 @@ class TestQuadraticDegradation:
             f"Positive quadratic should increase long stint cost: "
             f"linear={linear_time:.1f}s, convex={convex_time:.1f}s"
         )
+
+
+# ------------------------------------------------------------------
+# Compound base pace offset tests
+# ------------------------------------------------------------------
+
+class TestCompoundOffsets:
+    """Verify that compound base pace offsets correctly model the
+    inherent speed difference between compounds on fresh tyres.
+
+    SOFT tyres are ~1s/lap faster than HARD on fresh rubber. Without
+    these offsets, all compounds start at the same base_lap_time and
+    differ only by degradation rate — making HARD look artificially cheap.
+    """
+
+    @pytest.fixture(scope="class")
+    def engine(self):
+        return StrategyEngine()
+
+    def test_offset_adds_time_per_lap(self, engine):
+        """Compound offsets should add time to every lap of a stint.
+
+        A HARD compound with offset=1.0 should cost 1.0s × race_laps more
+        than the same compound with offset=0.0.
+        """
+        rates = _flat_to_coeffs({"HARD": 0.06})
+        no_offset = engine._simulate_race(
+            ("HARD",), [66], 80.0, rates, 0.07, 22.0, 66,
+            compound_offsets={"HARD": 0.0},
+        )
+        with_offset = engine._simulate_race(
+            ("HARD",), [66], 80.0, rates, 0.07, 22.0, 66,
+            compound_offsets={"HARD": 1.0},
+        )
+        # With offset=1.0, each of 66 laps should be 1.0s slower
+        expected_diff = 66.0
+        assert abs((with_offset - no_offset) - expected_diff) < 0.01, (
+            f"Offset=1.0 should add {expected_diff}s over 66 laps, "
+            f"actual diff={with_offset - no_offset:.1f}s"
+        )
+
+    def test_no_offsets_backward_compatible(self, engine):
+        """compound_offsets=None should give identical results to before."""
+        rates = _flat_to_coeffs({"MEDIUM": 0.10, "HARD": 0.06})
+        time_none = engine._simulate_race(
+            ("MEDIUM", "HARD"), [30, 36], 80.0, rates,
+            0.07, 22.0, 66,
+            compound_offsets=None,
+        )
+        time_empty = engine._simulate_race(
+            ("MEDIUM", "HARD"), [30, 36], 80.0, rates,
+            0.07, 22.0, 66,
+            compound_offsets={},
+        )
+        assert abs(time_none - time_empty) < 0.01, (
+            f"None and empty offsets should give same result: "
+            f"{time_none:.1f}s vs {time_empty:.1f}s"
+        )
+
+    def test_offsets_penalize_hard_vs_soft(self, engine):
+        """With offsets, HARD stints cost more due to slower base pace.
+
+        Compare two 1-stop strategies with the same deg rates but
+        different compound offsets.  The strategy using more HARD laps
+        should be more expensive with offsets than without.
+        """
+        rates = _flat_to_coeffs({"SOFT": 0.12, "HARD": 0.06})
+        # Without offsets: HARD is cheap because it degrades less
+        no_offset_sh = engine._simulate_race(
+            ("SOFT", "HARD"), [20, 46], 80.0, rates, 0.07, 22.0, 66,
+            compound_offsets=None,
+        )
+        # With offsets: HARD pays 1.0s/lap inherent pace penalty
+        with_offset_sh = engine._simulate_race(
+            ("SOFT", "HARD"), [20, 46], 80.0, rates, 0.07, 22.0, 66,
+            compound_offsets={"SOFT": 0.0, "HARD": 1.0},
+        )
+        # The HARD stint is 46 laps, so offsets add ~46s to the HARD stint
+        # (SOFT stint adds 0s since its offset is 0)
+        diff = with_offset_sh - no_offset_sh
+        assert abs(diff - 46.0) < 0.01, (
+            f"Expected ~46s penalty for 46 HARD laps at 1.0s offset, "
+            f"got {diff:.1f}s"
+        )
+
+    def test_offsets_not_scaled_by_deg_scaling(self):
+        """Compound offsets should NOT be affected by deg_scaling.
+
+        Offsets represent inherent compound pace (grip level), not
+        degradation.  deg_scaling only affects deg rates.
+        """
+        # This is a design constraint verified by reading the code:
+        # compound_offsets are extracted from deg_data before deg_scaling
+        # is applied, and passed separately through the simulation.
+        # We just verify the API response shows offsets that aren't
+        # suspiciously scaled.
+        engine = StrategyEngine()
+        result_85 = engine.calculate(2024, "Spain", 66, deg_scaling=0.85)
+        result_100 = engine.calculate(2024, "Spain", 66, deg_scaling=1.0)
+
+        offsets_85 = result_85.get("compound_offsets_used", {})
+        offsets_100 = result_100.get("compound_offsets_used", {})
+
+        # Offsets should be identical regardless of deg_scaling
+        for compound in offsets_85:
+            if compound in offsets_100:
+                assert offsets_85[compound] == offsets_100[compound], (
+                    f"{compound} offset changed with deg_scaling: "
+                    f"0.85={offsets_85[compound]}, 1.0={offsets_100[compound]}"
+                )

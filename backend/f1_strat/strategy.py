@@ -10,6 +10,7 @@ race time.
 The core simulation works lap-by-lap:
 
     lap_time = base_lap_time
+             + compound_offset                                # inherent pace gap
              + (linear × tyre_age + quadratic × tyre_age²)  # tyres wearing out
              - (fuel_correction × laps_completed)             # car getting lighter
 
@@ -425,7 +426,7 @@ class StrategyEngine:
         )
 
         # -- Step 1c: Build deg rates based on conditions ------------------
-        deg_rates, base_time_offset = self._get_compound_config(
+        deg_rates, base_time_offset, compound_offsets = self._get_compound_config(
             conditions, deg_data, year, grand_prix, fuel_correction_s,
             intermediate_deg_rate, wet_deg_rate, deg_scaling,
             starting_compound,
@@ -465,6 +466,7 @@ class StrategyEngine:
                 compounds, race_laps, adjusted_base,
                 deg_rates, fuel_correction_s, pit_stop_loss_s, rules,
                 min_stint_laps, tyre_warmup_loss_s, position_loss_s,
+                compound_offsets,
             )
             if result is not None:
                 strategies.append(result)
@@ -495,6 +497,7 @@ class StrategyEngine:
             "regulations": rules,
             "conditions": conditions,
             "deg_rates_used": flat_deg_rates,
+            "compound_offsets_used": compound_offsets,
             "strategies": strategies,
         }
 
@@ -578,6 +581,9 @@ class StrategyEngine:
             "quadratic": 0.0,
         }
 
+        # -- Compound base pace offsets (dry compounds only) -----------------
+        compound_offsets = dict(deg_data.get("compound_offsets", {}))
+
         # -- Base lap time (dry) -------------------------------------------
         base_lap_time = self._session_service.get_base_lap_time(year, grand_prix)
 
@@ -591,6 +597,7 @@ class StrategyEngine:
                 compounds_per_window, sorted_windows, race_laps,
                 base_lap_time, all_deg_rates, fuel_correction_s,
                 pit_stop_loss_s, tyre_warmup_loss_s, position_loss_s,
+                compound_offsets,
             )
             if result is not None:
                 strategies.append(result)
@@ -624,6 +631,7 @@ class StrategyEngine:
             "regulations": rules,
             "conditions": "mixed",
             "deg_rates_used": flat_deg_rates,
+            "compound_offsets_used": compound_offsets,
             "weather_windows": sorted_windows,
             "strategies": strategies,
         }
@@ -682,6 +690,7 @@ class StrategyEngine:
         pit_stop_loss_s: float,
         tyre_warmup_loss_s: float = 0.0,
         position_loss_s: float = 0.0,
+        compound_offsets: dict[str, float] | None = None,
     ) -> dict | None:
         """Find optimal pit laps for a weather-aware compound plan.
 
@@ -732,6 +741,7 @@ class StrategyEngine:
                         compounds, [stint1_laps, stint2_laps],
                         base_lap_time, deg_rates, fuel_correction_s,
                         race_laps, win["start_lap"], win["condition"],
+                        compound_offsets,
                     )
                     # Add one pit stop within the window
                     window_time += pit_stop_loss_s
@@ -769,6 +779,7 @@ class StrategyEngine:
             race_laps, weather_windows=windows,
             tyre_warmup_loss_s=tyre_warmup_loss_s,
             position_loss_s=position_loss_s,
+            compound_offsets=compound_offsets,
         )
 
         # Subtract the pit stops that _simulate_race added (it counts all
@@ -801,6 +812,7 @@ class StrategyEngine:
         race_laps: int,
         window_start_lap: int,
         condition: str,
+        compound_offsets: dict[str, float] | None = None,
     ) -> float:
         """Simulate a subset of the race within one weather window.
 
@@ -810,18 +822,25 @@ class StrategyEngine:
         """
         time = 0.0
         race_lap = window_start_lap
-        offset = _CONDITION_OFFSETS.get(condition, 0.0)
+        condition_offset = _CONDITION_OFFSETS.get(condition, 0.0)
 
         for compound, stint_laps in zip(compounds, stint_lengths):
             coeffs = deg_rates[compound]
+            # Compound base pace offset — inherent speed gap between
+            # compounds on fresh tyres (e.g., SOFT faster than HARD)
+            cpd_offset = 0.0
+            if compound_offsets:
+                cpd_offset = compound_offsets.get(compound, 0.0)
+
             for tyre_age in range(1, stint_laps + 1):
                 laps_remaining = race_laps - race_lap + 1
                 lap_time = (
                     base_lap_time
+                    + cpd_offset
                     + (coeffs["linear"] * tyre_age
                        + coeffs["quadratic"] * tyre_age ** 2)
                     - (fuel_correction_s * (race_laps - laps_remaining))
-                    + offset
+                    + condition_offset
                 )
                 time += lap_time
                 race_lap += 1
@@ -839,7 +858,7 @@ class StrategyEngine:
         wet_deg_rate: float,
         deg_scaling: float = 0.85,
         starting_compound: str | None = None,
-    ) -> tuple[dict[str, dict], float]:
+    ) -> tuple[dict[str, dict], float, dict[str, float]]:
         """Build compound deg rates and base time offset for the given conditions.
 
         In dry mode, uses the practice-derived dry compound rates, scaled
@@ -851,8 +870,12 @@ class StrategyEngine:
         falls back to the user-provided default rates.
 
         Returns:
-            (deg_rates_dict, base_time_offset_s) where deg_rates_dict maps
-            compound names to {"linear": float, "quadratic": float}.
+            (deg_rates_dict, base_time_offset_s, compound_offsets) where:
+            - deg_rates_dict maps compound names to
+              {"linear": float, "quadratic": float}
+            - base_time_offset_s is the condition-based time offset
+            - compound_offsets maps compound names to base pace offset
+              in seconds (0.0 for fastest, positive for slower compounds)
         """
         base_time_offset = _CONDITION_OFFSETS.get(conditions, 0.0)
 
@@ -882,6 +905,13 @@ class StrategyEngine:
                     rate = round(info["degradation_per_lap_s"] * deg_scaling, 4)
                     deg_rates[compound] = {"linear": rate, "quadratic": 0.0}
 
+            # -- Compound base pace offsets from practice -------------------
+            # Fresh SOFT tyres are ~1s/lap faster than fresh HARD tyres.
+            # These offsets capture that inherent pace gap, independent of
+            # degradation rate.  NOT scaled by deg_scaling because they
+            # represent inherent compound pace, not degradation.
+            compound_offsets = dict(deg_data.get("compound_offsets", {}))
+
             # Fallback: if HARD data is missing from practice (teams often
             # don't do long HARD runs in practice), estimate it from the
             # MEDIUM rate.  HARD typically degrades at ~60% the rate of
@@ -899,6 +929,13 @@ class StrategyEngine:
                     "quad=%.6f (60%% of MEDIUM)",
                     deg_rates["HARD"]["linear"], deg_rates["HARD"]["quadratic"],
                 )
+                # Fallback offset for HARD: MEDIUM offset + 0.6s.
+                # Community consensus: HARD is ~0.5-1.0s slower than MEDIUM
+                # on fresh tyres.  0.6s is conservative.
+                if "HARD" not in compound_offsets and "MEDIUM" in compound_offsets:
+                    compound_offsets["HARD"] = round(
+                        compound_offsets["MEDIUM"] + 0.6, 3
+                    )
 
             # Fallback: if SOFT data is missing from practice AND the user
             # explicitly requested SOFT as a starting compound (e.g., Q2
@@ -921,8 +958,14 @@ class StrategyEngine:
                     "quad=%.6f (160%% of MEDIUM, needed for starting_compound=SOFT)",
                     deg_rates["SOFT"]["linear"], deg_rates["SOFT"]["quadratic"],
                 )
+                # Fallback offset for SOFT: max(0, MEDIUM offset - 0.5s).
+                # SOFT is faster than MEDIUM, so its offset should be lower.
+                if "SOFT" not in compound_offsets and "MEDIUM" in compound_offsets:
+                    compound_offsets["SOFT"] = round(
+                        max(0.0, compound_offsets["MEDIUM"] - 0.5), 3
+                    )
 
-            return deg_rates, base_time_offset
+            return deg_rates, base_time_offset, compound_offsets
 
         # -- Wet conditions: try real practice data first ------------------
         # Wet compounds always use quadratic=0 because there's too little
@@ -948,7 +991,10 @@ class StrategyEngine:
                 "INTERMEDIATE": {"linear": inter_rate, "quadratic": 0.0},
             }
 
-        return deg_rates, base_time_offset
+        # Wet compounds don't have meaningful base pace offsets — they're
+        # a completely different class of tyre with different baseline speed.
+        # The condition offset (3s/7s) already handles the pace difference.
+        return deg_rates, base_time_offset, {}
 
     # ------------------------------------------------------------------
     # Strategy generation
@@ -1065,6 +1111,7 @@ class StrategyEngine:
         min_stint_laps: int = _MIN_STINT_LAPS,
         tyre_warmup_loss_s: float = 0.0,
         position_loss_s: float = 0.0,
+        compound_offsets: dict[str, float] | None = None,
     ) -> dict | None:
         """Find the optimal pit lap(s) for a given compound sequence.
 
@@ -1097,6 +1144,7 @@ class StrategyEngine:
                 deg_rates, fuel_correction_s, pit_stop_loss_s, race_laps,
                 tyre_warmup_loss_s=tyre_warmup_loss_s,
                 position_loss_s=position_loss_s,
+                compound_offsets=compound_offsets,
             )
             best_time = time
             best_splits = splits
@@ -1113,6 +1161,7 @@ class StrategyEngine:
                     deg_rates, fuel_correction_s, pit_stop_loss_s, race_laps,
                     tyre_warmup_loss_s=tyre_warmup_loss_s,
                     position_loss_s=position_loss_s,
+                    compound_offsets=compound_offsets,
                 )
                 if time < best_time:
                     best_time = time
@@ -1134,6 +1183,7 @@ class StrategyEngine:
                         deg_rates, fuel_correction_s, pit_stop_loss_s, race_laps,
                         tyre_warmup_loss_s=tyre_warmup_loss_s,
                         position_loss_s=position_loss_s,
+                        compound_offsets=compound_offsets,
                     )
                     if time < best_time:
                         best_time = time
@@ -1169,6 +1219,7 @@ class StrategyEngine:
                             race_laps,
                             tyre_warmup_loss_s=tyre_warmup_loss_s,
                             position_loss_s=position_loss_s,
+                            compound_offsets=compound_offsets,
                         )
                         if time < best_time:
                             best_time = time
@@ -1216,14 +1267,21 @@ class StrategyEngine:
         weather_windows: list[dict] | None = None,
         tyre_warmup_loss_s: float = 0.0,
         position_loss_s: float = 0.0,
+        compound_offsets: dict[str, float] | None = None,
     ) -> float:
         """Simulate a full race and return the total time in seconds.
 
         Runs through every lap, computing:
-            lap_time = base + (linear × tyre_age + quadratic × tyre_age²)
+            lap_time = base + compound_offset
+                     + (linear × tyre_age + quadratic × tyre_age²)
                      - (fuel_corr × laps_completed)
                      + weather_offset  (if weather_windows provided)
                      + warmup_penalty  (first lap of each stint after a pit stop)
+
+        The compound_offset captures the inherent pace difference between
+        compounds on fresh tyres (e.g., SOFT is ~1s/lap faster than HARD).
+        This is NOT scaled by deg_scaling because it's inherent compound
+        pace, not degradation.
 
         The weather_offset adds time for wet conditions on a per-lap basis.
         When weather_windows is None, lap times use the base time as-is
@@ -1264,6 +1322,9 @@ class StrategyEngine:
             position_loss_s: Seconds lost per escalating pit stop due to
                 track position loss and traffic.  Default 0.0 (backward
                 compatible).  Typical value: 3.0.
+            compound_offsets: Per-compound base pace offset in seconds.
+                0.0 for the fastest compound, positive for slower ones.
+                Default None (no offsets applied — backward compatible).
 
         Returns:
             Total race time in seconds.
@@ -1283,14 +1344,25 @@ class StrategyEngine:
                 # On the last lap (race_lap == race_laps), remaining = 1.
                 laps_remaining = race_laps - race_lap + 1
 
-                # Base time + degradation penalty - fuel benefit.
+                # Base time + compound offset + degradation penalty - fuel benefit.
+                #
+                # compound_offset: inherent pace gap between compounds on
+                # fresh tyres.  SOFT is fastest (offset=0), HARD is slowest
+                # (offset ~1.0s).  This is NOT degradation — it's the raw
+                # speed difference from compound softness/grip level.
+                #
                 # Degradation uses a quadratic model:
                 #   linear * tyre_age + quadratic * tyre_age²
                 # When quadratic=0, this is identical to the old linear model.
                 # When quadratic < 0 (typical — concave/flattening), long
                 # stints are less penalized than pure linear would predict.
+                offset = 0.0
+                if compound_offsets:
+                    offset = compound_offsets.get(compound, 0.0)
+
                 lap_time = (
                     base_lap_time
+                    + offset
                     + (coeffs["linear"] * tyre_age
                        + coeffs["quadratic"] * tyre_age ** 2)
                     - (fuel_correction_s * (race_laps - laps_remaining))

@@ -208,6 +208,65 @@ def test_print_summary(degradation_data):
     print("=" * 70 + "\n")
 
 
+def test_compound_offsets_present(degradation_data):
+    """Compound offsets should be present in the degradation response.
+
+    These offsets capture the inherent pace gap between compounds on
+    fresh tyres — e.g., SOFT is ~0.5-1.5s/lap faster than HARD when new.
+    The fastest compound gets offset 0.0, slower ones get positive values.
+    """
+    assert "compound_offsets" in degradation_data, (
+        "Expected 'compound_offsets' in degradation response"
+    )
+    offsets = degradation_data["compound_offsets"]
+
+    # Should have at least 2 compounds with offsets
+    assert len(offsets) >= 2, (
+        f"Expected at least 2 compound offsets, got {offsets}"
+    )
+
+    # The fastest compound should have offset 0.0
+    min_offset = min(offsets.values())
+    assert min_offset == 0.0, (
+        f"Fastest compound should have offset 0.0, got {min_offset}"
+    )
+
+    # All offsets should be non-negative (relative to the fastest)
+    for compound, offset in offsets.items():
+        assert offset >= 0.0, (
+            f"{compound} has negative offset {offset}s — "
+            f"offsets should be relative to the fastest compound"
+        )
+
+    # SOFT should generally be the fastest (offset 0 or near 0),
+    # and HARD should be slowest (highest offset).  We check that
+    # HARD's offset is > SOFT's offset — this is a fundamental
+    # property of F1 tyres.
+    if "SOFT" in offsets and "HARD" in offsets:
+        assert offsets["HARD"] > offsets["SOFT"], (
+            f"HARD offset ({offsets['HARD']}s) should be greater than "
+            f"SOFT offset ({offsets['SOFT']}s) — harder tyres are slower"
+        )
+
+    # Print for visual inspection
+    print(f"\n  Compound base pace offsets: {offsets}")
+
+
+def test_compound_offsets_reasonable(degradation_data):
+    """Compound offsets should be in a physically realistic range.
+
+    In F1, the gap between SOFT and HARD on fresh tyres is typically
+    0.5-2.0s/lap.  Anything outside this range suggests a data issue.
+    """
+    offsets = degradation_data["compound_offsets"]
+    if "HARD" in offsets and "SOFT" in offsets:
+        gap = offsets["HARD"] - offsets["SOFT"]
+        assert 0.2 < gap < 3.0, (
+            f"HARD-SOFT offset gap is {gap:.2f}s — expected 0.2-3.0s. "
+            f"Full offsets: {offsets}"
+        )
+
+
 def test_deg_coefficients_present(degradation_data):
     """Each compound should include deg_coefficients with linear and quadratic keys.
 

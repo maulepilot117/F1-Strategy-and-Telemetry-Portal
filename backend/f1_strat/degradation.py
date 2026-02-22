@@ -156,12 +156,15 @@ class DegradationService:
         # FP1 and poor weather, or cancelled sessions).
         if all_laps.empty:
             deltas = pd.DataFrame()
+            baselines = []
         else:
             # -- Step 2: Filter out noisy laps -----------------------------
             clean_laps = self._filter_laps(all_laps)
 
             # -- Step 3: Compute fuel-corrected deltas per stint -----------
-            deltas = self._compute_stint_deltas(clean_laps, fuel_correction_s)
+            deltas, baselines = self._compute_stint_deltas(
+                clean_laps, fuel_correction_s
+            )
 
         # -- Step 3b: Load historical race data for quadratic stabilization --
         # Historical races at the same circuit provide 120-180 stints (vs
@@ -217,11 +220,18 @@ class DegradationService:
         except Exception as exc:
             logger.warning("Could not get race info: %s", exc)
 
+        # -- Step 7b: Compute compound base pace offsets --------------------
+        # Fresh SOFT tyres are inherently faster than fresh HARD tyres.
+        # This offset captures that gap from practice data, so the strategy
+        # engine can properly account for each compound's starting pace.
+        compound_offsets = self._compute_compound_offsets(baselines)
+
         result = {
             "event_name": event_name,
             "year": year,
             "fuel_correction_s_per_lap": fuel_correction_s,
             "compounds": compounds,
+            "compound_offsets": compound_offsets,
             "weather_summary": weather_summary,
             "wet_compounds_available": wet_compounds_available,
         }
@@ -294,7 +304,9 @@ class DegradationService:
                 "compounds": {},
             }
 
-        deltas = self._compute_stint_deltas(clean_laps, fuel_correction_s)
+        deltas, _baselines = self._compute_stint_deltas(
+            clean_laps, fuel_correction_s
+        )
         race_track_temp = self._get_race_track_temp(year, grand_prix)
         compounds = self._build_curves(
             deltas, race_track_temp=race_track_temp
@@ -445,7 +457,9 @@ class DegradationService:
                     )
                     continue
 
-                deltas = self._compute_stint_deltas(clean, fuel_correction_s)
+                deltas, _baselines = self._compute_stint_deltas(
+                    clean, fuel_correction_s
+                )
 
                 if not deltas.empty:
                     # Tag with source year for traceability in logs/debugging
@@ -562,7 +576,7 @@ class DegradationService:
 
     def _compute_stint_deltas(
         self, laps: pd.DataFrame, fuel_correction_s: float
-    ) -> pd.DataFrame:
+    ) -> tuple[pd.DataFrame, list[dict]]:
         """For each stint, compute the fuel-corrected time delta.
 
         A "stint" is a continuous run on one set of tyres.  We group by
@@ -583,11 +597,16 @@ class DegradationService:
         push-lap qualifying simulations, not race-pace runs.
 
         Returns:
-            DataFrame with columns: Compound, tyre_age, corrected_delta_s,
-            stint_track_temp_c (median track temp for the stint, NaN if
-            no weather data).
+            Tuple of (deltas_df, baselines_list):
+            - deltas_df: DataFrame with columns: Compound, tyre_age,
+              corrected_delta_s, stint_track_temp_c (median track temp for
+              the stint, NaN if no weather data).
+            - baselines_list: List of dicts with Compound, baseline_s
+              (peak grip lap time in seconds), and stint_track_temp_c for
+              each valid stint.  Used to compute compound base pace offsets.
         """
         records = []
+        baselines = []
 
         # Group by driver and stint — each group is one continuous tyre run
         for (driver, stint), group in laps.groupby(["Driver", "Stint"]):
@@ -641,6 +660,16 @@ class DegradationService:
                 if not temp_vals.empty:
                     stint_temp = float(temp_vals.median())
 
+            # Record the baseline (peak grip lap time) for this stint.
+            # Used later to compute compound base pace offsets — fresh
+            # SOFT tyres are inherently faster than fresh HARD tyres,
+            # independent of how fast each compound degrades.
+            baselines.append({
+                "Compound": compound,
+                "baseline_s": baseline_s,
+                "stint_track_temp_c": stint_temp,
+            })
+
             for i, (_, lap) in enumerate(deg_laps.iterrows()):
                 raw_delta = lap["LapTime_s"] - baseline_s
 
@@ -659,7 +688,65 @@ class DegradationService:
                     }
                 )
 
-        return pd.DataFrame(records)
+        return pd.DataFrame(records), baselines
+
+    @staticmethod
+    def _compute_compound_offsets(baselines: list[dict]) -> dict[str, float]:
+        """Compute per-compound base pace offsets from peak grip lap times.
+
+        Fresh SOFT tyres are inherently faster than fresh HARD tyres,
+        independent of degradation rate.  This method measures that gap
+        using the median peak-grip lap time from practice stints.
+
+        The offset is 0.0 for the fastest compound (usually SOFT) and
+        positive for slower ones.  For example:
+            {"SOFT": 0.0, "MEDIUM": 0.52, "HARD": 1.14}
+        means that on fresh tyres, MEDIUM is 0.52s/lap slower than SOFT
+        and HARD is 1.14s/lap slower.
+
+        Uses median (not mean) for robustness — consistent with our
+        median-over-mean pattern throughout the degradation pipeline.
+        Only includes dry compounds (SOFT, MEDIUM, HARD).
+
+        Args:
+            baselines: List of dicts from _compute_stint_deltas(), each
+                with Compound, baseline_s, and stint_track_temp_c.
+
+        Returns:
+            Dict mapping compound name to offset in seconds.
+            Empty dict if no baselines are available.
+        """
+        if not baselines:
+            return {}
+
+        df = pd.DataFrame(baselines)
+
+        # Only dry compounds — wet compounds are handled separately
+        df = df[df["Compound"].isin(_DRY_COMPOUNDS)]
+        if df.empty:
+            return {}
+
+        # Median baseline per compound — robust to outliers from
+        # traffic, fuel loads, or different car modes in practice
+        medians = df.groupby("Compound")["baseline_s"].median()
+
+        # Offset = difference from the fastest compound (usually SOFT).
+        # The fastest compound gets offset 0.0, slower compounds get
+        # positive values showing how much extra time they add per lap.
+        fastest = medians.min()
+        offsets = {
+            compound: round(float(median - fastest), 3)
+            for compound, median in medians.items()
+        }
+
+        logger.info(
+            "Compound base pace offsets: %s (vs %s at %.3fs)",
+            offsets,
+            medians.idxmin(),
+            fastest,
+        )
+
+        return offsets
 
     def _build_curves(
         self,
