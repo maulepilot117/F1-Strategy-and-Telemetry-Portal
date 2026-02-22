@@ -256,13 +256,13 @@ Strategy and qualifying endpoints are not cached because query parameters vary p
 
 The live race polling loop (`_poll_loop()` in `live_race.py`) has four performance optimizations:
 
-1. **Concurrent endpoint fetches** — The 4 non-stint endpoints (race_control, pit, position, intervals) are fetched concurrently with `asyncio.gather()` instead of sequentially.  This turns 4 × ~500ms sequential into 1 × ~500ms concurrent.
+1. **Concurrent endpoint fetches** — The 4 non-stint endpoints (race_control, pit, position, intervals) are fetched concurrently with `asyncio.gather(return_exceptions=True)` instead of sequentially.  This turns 4 × ~500ms sequential into 1 × ~500ms concurrent.  `return_exceptions=True` ensures one failed endpoint doesn't cancel the others.
 
-2. **Single stints fetch** — Stints are fetched once as a full (non-incremental) request after the concurrent batch.  This single fetch provides both `lap_end` values (needed for current lap detection) and compound/tyre data (needed for driver state).  Previously stints were fetched twice: once incrementally and once as a full re-fetch.
+2. **Single stints fetch** — Stints are fetched once as a full (non-incremental) request after the concurrent batch.  This single fetch provides both `lap_end` values (needed for current lap detection) and compound/tyre data (needed for driver state).
 
-3. **Non-blocking strategy recalculation** — `_maybe_recalculate()` runs via `asyncio.create_task()` instead of `await`, so the polling loop continues immediately.  SSE clients see position and tyre updates without waiting for strategy computation to finish.  The existing `_is_calculating` / `_needs_recalc` coalescing flags prevent overlapping recalculations, so this is safe.
+3. **Non-blocking strategy recalculation** — `_maybe_recalculate()` runs via `asyncio.create_task()` instead of `await`, so the polling loop continues immediately.  SSE clients see position and tyre updates without waiting for strategy computation to finish.  The existing `_is_calculating` / `_needs_recalc` coalescing flags prevent overlapping recalculations, so this is safe.  A `done_callback` logs any unhandled exceptions from the background task.
 
-4. **Event-driven SSE delivery** — A module-level `asyncio.Event` (`_state_changed`) is set at the end of each polling cycle and after strategy recalculation.  SSE generators use `asyncio.wait_for(_state_changed.wait(), timeout=15.0)` instead of `asyncio.sleep(1)`, delivering state updates to clients within milliseconds instead of up to 1 second.  The 15-second timeout preserves keepalive behavior.
+4. **Event-driven SSE delivery** — A module-level `asyncio.Condition` (`_state_changed`) is notified at the end of each polling cycle and after strategy recalculation.  SSE generators use `Condition.wait()` with a 15-second timeout instead of `asyncio.sleep(1)`, delivering state updates to clients within milliseconds instead of up to 1 second.  `Condition.notify_all()` is the standard asyncio pattern for waking multiple consumers without the timing subtleties of `Event.set()`/`clear()`.
 
 ### Live race tracking architecture
 

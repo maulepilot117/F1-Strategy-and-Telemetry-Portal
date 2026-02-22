@@ -39,6 +39,19 @@ _strategy_engine = StrategyEngine()
 _is_calculating: bool = False
 _needs_recalc: bool = False
 
+
+def _log_task_exception(task: asyncio.Task) -> None:
+    """Log unhandled exceptions from fire-and-forget background tasks.
+
+    Without this callback, exceptions from create_task() are silently
+    swallowed and only produce a warning when the task is garbage-collected.
+    """
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.error("Background task failed: %s", exc, exc_info=exc)
+
 # ---------------------------------------------------------------------------
 # OpenF1 API base URL
 # ---------------------------------------------------------------------------
@@ -301,10 +314,11 @@ _race_state: dict = _empty_state()
 # Track connected SSE clients so we can auto-stop polling
 _sse_client_count: int = 0
 
-# Event that wakes SSE generators immediately when state changes, instead
-# of the generators polling every 1 second.  Set (then cleared) at the end
-# of each polling cycle so all waiting generators wake up at once.
-_state_changed: asyncio.Event = asyncio.Event()
+# Condition that wakes SSE generators immediately when state changes.
+# Uses notify_all() so all waiting generators wake up at once — unlike
+# Event.set()/clear(), Condition.notify_all() is designed for this
+# producer/multiple-consumer pattern and has no timing edge cases.
+_state_changed: asyncio.Condition = asyncio.Condition()
 
 # ---------------------------------------------------------------------------
 # State update functions — called by the polling loop
@@ -548,8 +562,8 @@ async def _maybe_recalculate() -> None:
         # Wake SSE clients so they get the new strategies immediately.
         # This is important when recalculation runs as a background task
         # (create_task) — without this, clients would wait up to 15s.
-        _state_changed.set()
-        _state_changed.clear()
+        async with _state_changed:
+            _state_changed.notify_all()
         logger.info(
             "Recalculated strategies for %d drivers (lap %d/%d)",
             len(strategies_by_driver), current_lap, total_laps,
@@ -577,7 +591,6 @@ _polling_task: asyncio.Task | None = None
 _last_timestamps: dict[str, str | None] = {
     "race_control": None,
     "pit": None,
-    "stints": None,
     "position": None,
     "intervals": None,
 }
@@ -699,6 +712,12 @@ async def _poll_loop(session_key: int) -> None:
         ("intervals", "/intervals", _update_from_intervals),
     ]
 
+    async def _fetch_endpoint(key: str, path: str) -> tuple[str, list[dict]]:
+        """Fetch a single OpenF1 endpoint with incremental since-params."""
+        params = _make_since_params(session_key, key)
+        data = await fetch_openf1(path, params)
+        return key, data
+
     idle_since: float | None = None
 
     while _race_state["polling_active"]:
@@ -718,27 +737,28 @@ async def _poll_loop(session_key: int) -> None:
         # Fetch all non-stint endpoints concurrently — each endpoint is
         # independent, so there's no reason to wait for one before starting
         # the next.  This turns 4 × ~500ms sequential into 1 × ~500ms.
-        async def _fetch_endpoint(key, path):
-            params = _make_since_params(session_key, key)
-            data = await fetch_openf1(path, params)
-            return key, data
-
+        # return_exceptions=True ensures one failed endpoint doesn't cancel
+        # the others — each result is processed independently.
         results = await asyncio.gather(
-            *[_fetch_endpoint(key, path) for key, path, _ in endpoints]
+            *[_fetch_endpoint(key, path) for key, path, _ in endpoints],
+            return_exceptions=True,
         )
 
-        # Apply results — updaters are sync functions, safe to call here
-        updater_map = {key: updater for key, _, updater in endpoints}
-        for key, data in results:
+        # Apply results — gather preserves input order, so we zip against
+        # the original endpoints list to get each result's updater.
+        for (_, _, updater), result in zip(endpoints, results):
+            if isinstance(result, Exception):
+                logger.warning("Endpoint fetch failed: %s", result)
+                continue
+            key, data = result
             _track_latest_timestamp(data, key)
             if data:
-                updater_map[key](data)
+                updater(data)
 
-        # Single full stints fetch — provides lap_end values for current
-        # lap detection AND compound/tyre data for driver state.  This
-        # replaces both the incremental stint fetch (removed from the
-        # concurrent batch above) and the separate full re-fetch that
-        # previously happened after the loop.
+        # Full stints fetch — provides lap_end values for current lap
+        # detection AND compound/tyre data for driver state.  Fetched
+        # separately (not incrementally) because lap_end only appears
+        # when a stint is complete.
         all_stints = await fetch_openf1("/stints", {"session_key": session_key})
         if all_stints:
             # Find the max lap_end across all drivers for current lap
@@ -755,8 +775,8 @@ async def _poll_loop(session_key: int) -> None:
 
         # Mark the state as updated and wake SSE clients immediately
         _race_state["last_updated"] = datetime.now(timezone.utc).isoformat()
-        _state_changed.set()
-        _state_changed.clear()
+        async with _state_changed:
+            _state_changed.notify_all()
 
         # Trigger strategy recalculation if something strategy-relevant changed:
         # 1. New pit events (a driver pitted → different compound/tyre age)
@@ -769,7 +789,8 @@ async def _poll_loop(session_key: int) -> None:
         no_strategies_yet = not _race_state.get("strategies")
 
         if (sc_changed or new_pits or no_strategies_yet) and _race_state["current_lap"] > 0:
-            asyncio.create_task(_maybe_recalculate())
+            task = asyncio.create_task(_maybe_recalculate())
+            task.add_done_callback(_log_task_exception)
 
         # Check if race is finished
         if (
@@ -818,56 +839,6 @@ async def stop_polling() -> None:
         logger.info("Polling task cancelled")
 
     _polling_task = None
-
-
-# ---------------------------------------------------------------------------
-# SSE generator — yields full state snapshots
-# ---------------------------------------------------------------------------
-
-async def race_state_generator(disconnect_event: asyncio.Event) -> None:
-    """Async generator that yields full _race_state snapshots as SSE data.
-
-    Yields the current state on connect, then re-yields whenever
-    last_updated changes.  Uses _state_changed Event to wake instantly
-    when the polling loop updates state, instead of polling every 1 second.
-    Falls back to a 15-second timeout for keepalive comments to prevent
-    proxy/browser connection drops.
-
-    Args:
-        disconnect_event: Set when the client disconnects (checked each loop).
-
-    Yields:
-        dict: The full _race_state to be serialized as JSON by sse-starlette.
-    """
-    global _sse_client_count
-    _sse_client_count += 1
-    logger.info("SSE client connected (total: %d)", _sse_client_count)
-
-    try:
-        last_sent = None
-
-        while not disconnect_event.is_set():
-            current = _race_state.get("last_updated")
-
-            if current != last_sent:
-                # State changed — yield a full snapshot
-                last_sent = current
-                yield _race_state
-
-            # Wait for the next state change or 15s timeout (keepalive).
-            # _state_changed is set/cleared by the polling loop each cycle,
-            # so this wakes within milliseconds of a state update instead
-            # of the old 1-second polling delay.
-            try:
-                await asyncio.wait_for(_state_changed.wait(), timeout=15.0)
-            except asyncio.TimeoutError:
-                # 15s without a state change — this is fine, just loop
-                # back and the next iteration will check for disconnect
-                pass
-
-    finally:
-        _sse_client_count -= 1
-        logger.info("SSE client disconnected (total: %d)", _sse_client_count)
 
 
 # ---------------------------------------------------------------------------

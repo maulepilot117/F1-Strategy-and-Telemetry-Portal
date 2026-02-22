@@ -158,6 +158,8 @@ def get_strategy(
     year: int,
     grand_prix: str,
     race_laps: int = Query(
+        ge=10,
+        le=100,
         description="Total number of laps in the race (e.g., 66 for Spain).",
     ),
     pit_stop_loss: float | None = Query(
@@ -569,7 +571,7 @@ async def live_stream(request: Request, session_key: int) -> EventSourceResponse
     async def event_generator():
         """Yield SSE events — full state snapshots + keepalive comments.
 
-        Uses live_race._state_changed Event to wake instantly on state
+        Uses live_race._state_changed Condition to wake instantly on state
         updates instead of polling every 1 second.  Falls back to a
         15-second timeout for keepalive comments.
         """
@@ -593,13 +595,14 @@ async def live_stream(request: Request, session_key: int) -> EventSourceResponse
                     }
 
                 # Wait for the next state change or 15s timeout.
-                # _state_changed is set by the polling loop and by
+                # _state_changed is notified by the polling loop and by
                 # _maybe_recalculate(), so we wake within milliseconds
                 # of any state update.
                 try:
-                    await asyncio.wait_for(
-                        live_race._state_changed.wait(), timeout=15.0,
-                    )
+                    async with live_race._state_changed:
+                        await asyncio.wait_for(
+                            live_race._state_changed.wait(), timeout=15.0,
+                        )
                 except asyncio.TimeoutError:
                     # 15s without state change — send keepalive
                     yield {"comment": "keepalive"}

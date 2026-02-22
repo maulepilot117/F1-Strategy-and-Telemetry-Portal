@@ -76,14 +76,14 @@ No shell commands are executed from user input. All processing is pure Python co
 ### SSRF — Low risk
 
 The backend makes outbound HTTP requests to two fixed hosts:
-- `ergast.com` / F1 live timing (via FastF1 library)
+- F1 live timing API (via FastF1 library)
 - `api.openf1.org` (via httpx in `live_race.py`)
 
 No user-controlled URLs are fetched. The `grand_prix` parameter is passed as a query parameter to OpenF1 (not as a URL path), so it cannot redirect requests.
 
 ### Denial of service — Moderate risk
 
-- **CPU-bound:** The strategy engine brute-forces all valid pit lap combinations. A 3-stop race with 78 laps generates ~300K combinations. This is bounded by `max_stops` (capped at 3) and `race_laps` (capped at 100 by Pydantic). Worst case: ~3 seconds of CPU.
+- **CPU-bound:** The strategy engine brute-forces all valid pit lap combinations. A 3-stop race with 78 laps generates ~300K combinations. This is bounded by `max_stops` (capped at 3) and `race_laps` (capped at 10-100 by FastAPI `Query(ge=10, le=100)` on both GET and POST endpoints). Worst case: ~3 seconds of CPU.
 - **Memory:** In-memory caches (`_analysis_cache`, `_base_lap_cache`) grow with the number of unique (year, GP) combinations requested. A full season is ~24 entries — negligible. No cache eviction is needed at this scale.
 - **SSE connections:** Each connected client holds an async generator. The `_sse_client_count` is tracked but not capped. On a home lab with 1-2 clients this is fine. If exposed publicly, add a connection limit.
 - **External API rate limits:** FastF1 has a 500 calls/hour limit. OpenF1 free tier has lower limits. The app respects `429 Retry-After` headers and backs off progressively (`_backoff_seconds` in `live_race.py`).

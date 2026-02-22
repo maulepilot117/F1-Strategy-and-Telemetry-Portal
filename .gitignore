@@ -18,6 +18,12 @@ venv/
 # Validation output (large JSON files from strategy analysis)
 validation_results/
 
+# Environment variables (may contain credentials)
+.env
+.env.local
+.env.production
+.env*.local
+
 # OS
 .DS_Store
 .playwright-mcp/
