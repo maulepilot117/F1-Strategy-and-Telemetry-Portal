@@ -577,6 +577,340 @@ class StrategyEngine:
         return result
 
     # ------------------------------------------------------------------
+    # Mid-race strategy recalculation (Phase 2: live tracking)
+    # ------------------------------------------------------------------
+
+    def calculate_remaining(
+        self,
+        year: int,
+        grand_prix: str | int,
+        current_lap: int,
+        race_laps: int,
+        current_compound: str,
+        tyre_age: int,
+        stops_completed: int,
+        compounds_used: list[str],
+        pit_stop_loss_s: float | None = None,
+        fuel_correction_s: float = 0.055,
+        max_stops: int = 2,
+        min_stint_laps: int = _MIN_STINT_LAPS,
+        tyre_warmup_loss_s: float = 1.0,
+        position_loss_s: float = 3.0,
+        deg_scaling: float = 0.85,
+    ) -> dict:
+        """Calculate optimal strategy from the current race position.
+
+        This is the mid-race counterpart to calculate().  Instead of
+        simulating from lap 1, it simulates only the remaining laps,
+        accounting for the driver's current compound, tyre age, and
+        stops already completed.
+
+        Key differences from calculate():
+        - Simulates remaining_laps = race_laps - current_lap
+        - First stint starts with current_compound at tyre_age
+        - Fuel correction accounts for laps already completed
+        - FIA compound diversity checked against compounds_used
+          (compounds already run in the race)
+        - First-stint bonus skipped (field is spread out mid-race)
+        - Position loss counted from remaining stops only
+        - Default max_stops=2 (keeps recalculation fast — O(N²))
+
+        Args:
+            year: Season year (e.g. 2025).
+            grand_prix: GP name ('Spain') or round number.
+            current_lap: The lap the driver is currently on (1-indexed).
+            race_laps: Total number of race laps.
+            current_compound: The compound the driver is currently on
+                (e.g., 'MEDIUM').
+            tyre_age: How many laps the driver has done on the current
+                set of tyres.
+            stops_completed: Number of pit stops already made.
+            compounds_used: List of compounds already used in the race
+                (e.g., ['SOFT', 'MEDIUM']).  Used for FIA diversity check.
+            pit_stop_loss_s: Time lost per pit stop.  When None, auto-
+                resolves to a circuit-specific value.
+            fuel_correction_s: Seconds per lap from fuel burn-off.
+            max_stops: Maximum additional stops to consider.  Default 2
+                (keeps recalculation fast for live use).
+            min_stint_laps: Minimum laps per stint.
+            tyre_warmup_loss_s: Cold tyre penalty per pit stop.
+            position_loss_s: Escalating position loss per stop.
+            deg_scaling: Practice-to-race degradation multiplier.
+
+        Returns:
+            Dict with event info, remaining laps, and ranked strategies
+            for the rest of the race.
+        """
+        remaining_laps = race_laps - current_lap
+        if remaining_laps < 1:
+            return {
+                "event_name": str(grand_prix),
+                "year": year,
+                "current_lap": current_lap,
+                "race_laps": race_laps,
+                "remaining_laps": 0,
+                "strategies": [],
+            }
+
+        # -- Get degradation data from practice --------------------------
+        deg_data = self._degradation_service.analyze(
+            year, grand_prix, fuel_correction_s
+        )
+        event_name = deg_data["event_name"]
+
+        # Resolve pit loss
+        if pit_stop_loss_s is None:
+            pit_stop_loss_s = get_pit_loss(event_name)
+
+        # -- Build deg rates (dry path only for live) --------------------
+        deg_rates, _, compound_offsets = self._get_compound_config(
+            "dry", deg_data, year, grand_prix, fuel_correction_s,
+            0.12, 0.15, deg_scaling, None,
+        )
+
+        if not deg_rates:
+            return {
+                "event_name": event_name,
+                "year": year,
+                "current_lap": current_lap,
+                "race_laps": race_laps,
+                "remaining_laps": remaining_laps,
+                "strategies": [],
+            }
+
+        # -- Get the base lap time --------------------------------------
+        base_lap_time = self._session_service.get_base_lap_time(year, grand_prix)
+
+        # -- FIA rules: check compound diversity -------------------------
+        # The FIA requires at least 2 different dry compounds per race.
+        # If the driver has already used 2+ compounds, any single compound
+        # is legal for the rest of the race (diversity is satisfied).
+        # If only 1 compound has been used so far, the remaining strategy
+        # must include at least one different compound.
+        rules = get_tyre_rules(year, event_name)
+        distinct_used = set(compounds_used)
+        diversity_satisfied = len(distinct_used) >= rules["min_compounds"]
+
+        # -- Generate compound sequences for remaining laps ----------------
+        available = sorted(deg_rates.keys())
+
+        # Build sequences: 0 additional stops through max_stops
+        sequences: list[tuple[str, ...]] = []
+
+        # 0 additional stops: continue on current compound to the end
+        # Only valid if diversity is already satisfied or the current
+        # compound doesn't create a single-compound race
+        if remaining_laps >= 1:
+            if diversity_satisfied:
+                sequences.append((current_compound,))
+            elif current_compound not in distinct_used:
+                # Adding a new compound — diversity now satisfied
+                sequences.append((current_compound,))
+
+        # 1+ additional stops: current compound first stint, then options
+        for num_extra_stops in range(1, max_stops + 1):
+            num_stints = num_extra_stops + 1  # includes current stint
+            if remaining_laps < min_stint_laps * num_stints:
+                continue
+
+            # Generate compound combos for stints after the current one
+            from itertools import product as iterproduct
+            for next_compounds in iterproduct(available, repeat=num_extra_stops):
+                # Full sequence: current compound + future compounds
+                full_seq = (current_compound,) + next_compounds
+
+                # Check FIA diversity: compounds_used + this sequence
+                all_compounds = distinct_used | set(full_seq)
+                if len(all_compounds) < rules["min_compounds"]:
+                    continue
+
+                # Check tyre allocation limits
+                from collections import Counter
+                counts = Counter(full_seq)
+                within_limits = True
+                for compound, count in counts.items():
+                    max_sets = _MAX_SETS_PER_COMPOUND.get(compound, 2)
+                    if count > max_sets:
+                        within_limits = False
+                        break
+                if not within_limits:
+                    continue
+
+                sequences.append(full_seq)
+
+        # -- Optimize each sequence --------------------------------------
+        strategies = []
+        for compounds in sequences:
+            result = self._optimize_remaining_strategy(
+                compounds, remaining_laps, base_lap_time,
+                deg_rates, fuel_correction_s, pit_stop_loss_s,
+                race_laps, current_lap, tyre_age,
+                min_stint_laps, tyre_warmup_loss_s, position_loss_s,
+                compound_offsets,
+            )
+            if result is not None:
+                strategies.append(result)
+
+        # -- Rank by total time ------------------------------------------
+        strategies.sort(key=lambda s: s["total_time_s"])
+
+        if strategies:
+            best_time = strategies[0]["total_time_s"]
+            for i, strat in enumerate(strategies):
+                strat["rank"] = i + 1
+                strat["gap_to_best_s"] = round(strat["total_time_s"] - best_time, 1)
+
+        # Flatten deg rates for API output
+        flat_deg_rates = {
+            compound: coeffs["linear"]
+            for compound, coeffs in deg_rates.items()
+        }
+
+        return {
+            "event_name": event_name,
+            "year": year,
+            "current_lap": current_lap,
+            "race_laps": race_laps,
+            "remaining_laps": remaining_laps,
+            "pit_stop_loss_s": pit_stop_loss_s,
+            "base_lap_time_s": base_lap_time,
+            "current_compound": current_compound,
+            "tyre_age": tyre_age,
+            "stops_completed": stops_completed,
+            "compounds_used": compounds_used,
+            "deg_rates_used": flat_deg_rates,
+            "strategies": strategies[:10],  # top 10 only for live display
+        }
+
+    def _optimize_remaining_strategy(
+        self,
+        compounds: tuple[str, ...],
+        remaining_laps: int,
+        base_lap_time: float,
+        deg_rates: dict[str, dict],
+        fuel_correction_s: float,
+        pit_stop_loss_s: float,
+        race_laps: int,
+        start_lap: int,
+        initial_tyre_age: int,
+        min_stint_laps: int = _MIN_STINT_LAPS,
+        tyre_warmup_loss_s: float = 0.0,
+        position_loss_s: float = 0.0,
+        compound_offsets: dict[str, float] | None = None,
+    ) -> dict | None:
+        """Find optimal pit laps for a mid-race compound sequence.
+
+        Similar to _optimize_strategy but handles the first stint having
+        an initial tyre age (the driver is partway through a stint).
+        The first stint's minimum length is reduced because the driver
+        may need to pit soon if their tyres are old.
+
+        Args:
+            compounds: Compound for each remaining stint.
+            remaining_laps: Laps left in the race.
+            base_lap_time: Fastest practice lap time.
+            deg_rates: Per-compound degradation coefficients.
+            fuel_correction_s: Fuel burn-off benefit per lap.
+            pit_stop_loss_s: Time lost per pit stop.
+            race_laps: Full race distance (for fuel correction).
+            start_lap: Current lap number (absolute, 1-indexed).
+            initial_tyre_age: Laps already done on current tyres.
+            min_stint_laps: Minimum laps per stint.
+            tyre_warmup_loss_s: Cold tyre penalty.
+            position_loss_s: Escalating position loss.
+            compound_offsets: Per-compound base pace offset.
+        """
+        num_stints = len(compounds)
+        num_stops = num_stints - 1
+
+        # The first stint can be shorter than min_stint_laps because the
+        # driver has already been running for initial_tyre_age laps.
+        # Allow pitting as soon as 1 lap from now.
+        first_stint_min = 1
+
+        best_time = float("inf")
+        best_splits = None
+
+        if num_stints == 1:
+            # No more stops — finish the race on current tyres
+            splits = [remaining_laps]
+            time = self._simulate_race(
+                compounds, splits, base_lap_time,
+                deg_rates, fuel_correction_s, pit_stop_loss_s, race_laps,
+                tyre_warmup_loss_s=tyre_warmup_loss_s,
+                position_loss_s=position_loss_s,
+                compound_offsets=compound_offsets,
+                start_lap=start_lap,
+                initial_tyre_age=initial_tyre_age,
+            )
+            best_time = time
+            best_splits = splits
+
+        elif num_stints == 2:
+            # 1 more stop: try every possible pit lap
+            for pit_at in range(first_stint_min, remaining_laps - min_stint_laps + 1):
+                splits = [pit_at, remaining_laps - pit_at]
+                time = self._simulate_race(
+                    compounds, splits, base_lap_time,
+                    deg_rates, fuel_correction_s, pit_stop_loss_s, race_laps,
+                    tyre_warmup_loss_s=tyre_warmup_loss_s,
+                    position_loss_s=position_loss_s,
+                    compound_offsets=compound_offsets,
+                    start_lap=start_lap,
+                    initial_tyre_age=initial_tyre_age,
+                )
+                if time < best_time:
+                    best_time = time
+                    best_splits = splits
+
+        elif num_stints == 3:
+            # 2 more stops
+            for pit1 in range(first_stint_min, remaining_laps - 2 * min_stint_laps + 1):
+                for pit2 in range(
+                    pit1 + min_stint_laps,
+                    remaining_laps - min_stint_laps + 1,
+                ):
+                    splits = [pit1, pit2 - pit1, remaining_laps - pit2]
+                    time = self._simulate_race(
+                        compounds, splits, base_lap_time,
+                        deg_rates, fuel_correction_s, pit_stop_loss_s, race_laps,
+                        tyre_warmup_loss_s=tyre_warmup_loss_s,
+                        position_loss_s=position_loss_s,
+                        compound_offsets=compound_offsets,
+                        start_lap=start_lap,
+                        initial_tyre_age=initial_tyre_age,
+                    )
+                    if time < best_time:
+                        best_time = time
+                        best_splits = splits
+
+        if best_splits is None:
+            return None
+
+        # Build stint details with absolute lap numbers
+        stints = []
+        lap_cursor = start_lap + 1
+        for compound, stint_laps in zip(compounds, best_splits):
+            stints.append({
+                "compound": compound,
+                "start_lap": lap_cursor,
+                "end_lap": lap_cursor + stint_laps - 1,
+                "laps": stint_laps,
+            })
+            lap_cursor += stint_laps
+
+        # Build name — the first compound is the current one
+        name = f"+{num_stops}-stop: {' → '.join(compounds)}"
+
+        return {
+            "name": name,
+            "total_time_s": round(best_time, 1),
+            "num_stops": num_stops,
+            "pit_laps": [s["end_lap"] for s in stints[:-1]],
+            "stints": stints,
+        }
+
+    # ------------------------------------------------------------------
     # Mixed-weather strategy calculation
     # ------------------------------------------------------------------
 
@@ -1350,8 +1684,10 @@ class StrategyEngine:
         tyre_warmup_loss_s: float = 0.0,
         position_loss_s: float = 0.0,
         compound_offsets: dict[str, float] | None = None,
+        start_lap: int = 0,
+        initial_tyre_age: int = 0,
     ) -> float:
-        """Simulate a full race and return the total time in seconds.
+        """Simulate a race (or remainder of a race) and return total time.
 
         Runs through every lap, computing:
             lap_time = base + compound_offset
@@ -1388,14 +1724,16 @@ class StrategyEngine:
 
         Args:
             compounds: Tyre compound for each stint (e.g., ('MEDIUM', 'HARD')).
-            stint_lengths: Number of laps in each stint (must sum to race_laps).
+            stint_lengths: Number of laps in each stint (must sum to race_laps
+                when start_lap=0, or to remaining_laps when start_lap>0).
             base_lap_time: Ideal lap time in seconds (fastest DRY practice lap).
             deg_rates: Degradation coefficients per compound.  Each value
                 is {"linear": float, "quadratic": float}.  When quadratic=0,
                 this is identical to the old linear model.
             fuel_correction_s: Time gained per lap from fuel burn-off.
             pit_stop_loss_s: Time lost per pit stop.
-            race_laps: Total race laps (used for fuel calculation).
+            race_laps: Total race laps (used for fuel calculation — the full
+                race distance, not just the remaining laps).
             weather_windows: Optional list of weather window dicts.  When
                 provided, each lap gets a condition-based time offset
                 (0s for dry, ~3s for inters, ~7s for wets).
@@ -1407,12 +1745,26 @@ class StrategyEngine:
             compound_offsets: Per-compound base pace offset in seconds.
                 0.0 for the fastest compound, positive for slower ones.
                 Default None (no offsets applied — backward compatible).
+            start_lap: Absolute lap number where this simulation begins.
+                Default 0 means a full race (lap 1 start).  When > 0,
+                used for mid-race recalculation: fuel correction accounts
+                for laps already completed, and the first-stint bonus is
+                skipped (the field is spread out mid-race, so starting
+                on a softer compound doesn't give a position advantage).
+            initial_tyre_age: Starting tyre age (in laps) for the first
+                stint.  Default 0 means fresh tyres.  When > 0, the first
+                stint's tyre_age starts at initial_tyre_age + 1 instead of 1,
+                so degradation accounts for laps already spent on the tyres.
+                Used for mid-race recalculation where the driver is
+                partway through a stint.
 
         Returns:
             Total race time in seconds.
         """
         total_time = 0.0
-        race_lap = 1  # Current race lap number (1-indexed)
+        # When start_lap > 0, we're simulating from the middle of the race.
+        # race_lap is the absolute lap number (used for fuel correction).
+        race_lap = start_lap + 1 if start_lap > 0 else 1
 
         for stint_idx, (compound, stint_laps) in enumerate(
             zip(compounds, stint_lengths)
@@ -1421,7 +1773,14 @@ class StrategyEngine:
             # {"linear": float, "quadratic": float}.
             coeffs = deg_rates[compound]
 
-            for tyre_age in range(1, stint_laps + 1):
+            # For the first stint, tyre_age starts at initial_tyre_age + 1
+            # (accounting for laps already spent on the tyres in mid-race
+            # recalculation).  For subsequent stints, tyres are fresh (age 1).
+            age_offset = initial_tyre_age if stint_idx == 0 else 0
+
+            for lap_in_stint in range(1, stint_laps + 1):
+                tyre_age = lap_in_stint + age_offset
+
                 # How many laps remain INCLUDING this one.
                 # On the last lap (race_lap == race_laps), remaining = 1.
                 laps_remaining = race_laps - race_lap + 1
@@ -1450,11 +1809,11 @@ class StrategyEngine:
                     - (fuel_correction_s * (race_laps - laps_remaining))
                 )
 
-                # Track position bonus in the first stint: softer compounds
-                # give better early pace, which translates to a clean-air
-                # and position advantage when the field is bunched.
-                # See _COMPOUND_SOFTNESS / _TRACK_POSITION_PACE_S above.
-                if stint_idx == 0:
+                # Track position bonus in the first stint — but only for
+                # full-race simulations (start_lap == 0).  Mid-race, the
+                # field is spread out so starting on a softer compound
+                # doesn't give the same clean-air advantage.
+                if stint_idx == 0 and start_lap == 0:
                     softness = _COMPOUND_SOFTNESS.get(compound, 0)
                     lap_time -= _TRACK_POSITION_PACE_S * softness
 
@@ -1463,7 +1822,7 @@ class StrategyEngine:
                 # because they haven't reached operating temperature yet.
                 # Default 1.0s (TUMFTM research).  This adds a realistic
                 # cost to each pit stop beyond just the pit lane time loss.
-                if stint_idx > 0 and tyre_age == 1:
+                if stint_idx > 0 and lap_in_stint == 1:
                     lap_time += tyre_warmup_loss_s
 
                 # In mixed-weather mode, add a per-lap offset for wet conditions.

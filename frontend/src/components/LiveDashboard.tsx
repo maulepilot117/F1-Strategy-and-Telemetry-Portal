@@ -14,6 +14,7 @@ import type {
   LiveDriver,
   LiveTeam,
   LiveRaceState,
+  LiveStrategy,
   RaceControlMessage,
 } from "../types";
 import { fetchSchedule, fetchLiveStatus, fetchLiveDrivers, startLiveTracking } from "../api";
@@ -159,6 +160,68 @@ function DriverCard({ driver, teamColor }: DriverCardProps) {
 }
 
 // ---------------------------------------------------------------------------
+// Strategy panel sub-component — shows top 3 recommendations per driver
+// ---------------------------------------------------------------------------
+
+interface StrategyPanelProps {
+  driver: LiveDriver;
+  strategies: LiveStrategy[];
+  teamColor: string;
+}
+
+function StrategyPanel({ driver, strategies, teamColor }: StrategyPanelProps) {
+  if (strategies.length === 0) return null;
+
+  return (
+    <div className={styles.strategyPanel}>
+      <div className={styles.strategyHeader} style={{ borderBottomColor: `#${teamColor}` }}>
+        <span className={styles.strategyDriverLabel} style={{ color: `#${teamColor}` }}>
+          {driver.abbreviation}
+        </span>
+        <span className={styles.strategyTitle}>Recommended Strategy</span>
+      </div>
+
+      {strategies.map((strat, i) => (
+        <div key={i} className={styles.strategyCard}>
+          <div className={styles.strategyRank}>
+            <span className={styles.rankBadge}>#{strat.rank}</span>
+            <span className={styles.strategyName}>{strat.name}</span>
+            {strat.gap_to_best_s > 0 && (
+              <span className={styles.strategyGap}>+{strat.gap_to_best_s.toFixed(1)}s</span>
+            )}
+          </div>
+          <div className={styles.strategyStints}>
+            {strat.stints.map((stint, j) => (
+              <span key={j} className={styles.strategyStint}>
+                {j > 0 && <span className={styles.pitArrow}>→</span>}
+                <span
+                  className={styles.tyreBadge}
+                  style={{
+                    backgroundColor: compoundColor(stint.compound),
+                    color: stint.compound.toUpperCase() === "HARD" ? "#000" : "#fff",
+                    fontSize: "0.7rem",
+                  }}
+                >
+                  {stint.compound.slice(0, 1)}
+                </span>
+                <span className={styles.stintLaps}>
+                  L{stint.start_lap}–{stint.end_lap}
+                </span>
+              </span>
+            ))}
+          </div>
+          {strat.pit_laps.length > 0 && (
+            <div className={styles.pitWindow}>
+              Pit: {strat.pit_laps.map((l) => `lap ${l}`).join(", ")}
+            </div>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Main LiveDashboard component
 // ---------------------------------------------------------------------------
 
@@ -242,8 +305,10 @@ export default function LiveDashboard() {
       const laps = status.total_laps ?? 66; // fallback if we can't determine lap count
       setTotalLaps(laps);
 
-      // Step 2: Tell the backend to start polling OpenF1
-      await startLiveTracking(status.session_key, laps);
+      // Step 2: Tell the backend to start polling OpenF1.
+      // Pass year and grandPrix so the backend can run mid-race strategy
+      // recalculation using practice degradation data for this circuit.
+      await startLiveTracking(status.session_key, laps, year, grandPrix);
 
       // Step 3: Connect the SSE stream (triggers useLiveRace)
       setSessionKey(status.session_key);
@@ -268,6 +333,11 @@ export default function LiveDashboard() {
     const team = teams.find((t) => t.team === selectedTeam);
     return team?.team_color ?? "888888";
   }, [teams, selectedTeam]);
+
+  // Per-driver strategies from the SSE state (keyed by driver_number)
+  const driverStrategies: Record<number, LiveStrategy[]> = useMemo(() => {
+    return raceState.strategies ?? {};
+  }, [raceState.strategies]);
 
   // Race control log — most recent first
   const recentMessages: RaceControlMessage[] = useMemo(() => {
@@ -390,6 +460,20 @@ export default function LiveDashboard() {
           ) : (
             <div className={styles.emptyState}>
               Waiting for driver data...
+            </div>
+          )}
+
+          {/* Strategy recommendations — one panel per team driver */}
+          {teamDrivers.length > 0 && Object.keys(driverStrategies).length > 0 && (
+            <div className={styles.strategyGrid}>
+              {teamDrivers.map((driver) => (
+                <StrategyPanel
+                  key={driver.driver_number}
+                  driver={driver}
+                  strategies={driverStrategies[driver.driver_number] ?? []}
+                  teamColor={teamColor}
+                />
+              ))}
             </div>
           )}
 

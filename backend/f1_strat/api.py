@@ -468,6 +468,8 @@ async def get_live_status(
 async def start_live_tracking(
     session_key: int,
     total_laps: int = Query(description="Total laps in the race"),
+    year: int | None = Query(default=None, description="Season year for strategy recalculation"),
+    grand_prix: str | None = Query(default=None, description="Grand Prix name for strategy recalculation"),
 ) -> dict:
     """Start polling OpenF1 for live race data.
 
@@ -475,9 +477,13 @@ async def start_live_tracking(
     without restarting.  If polling a different session, stops the old one
     and starts the new one.
 
-    **Example:** `POST /api/live/start/9539?total_laps=66`
+    The year and grand_prix params are used for mid-race strategy recalculation.
+    When provided, the engine loads practice degradation data for the circuit
+    and recalculates optimal strategies as the race unfolds.
+
+    **Example:** `POST /api/live/start/9539?total_laps=66&year=2024&grand_prix=Spain`
     """
-    await live_race.start_polling(session_key, total_laps)
+    await live_race.start_polling(session_key, total_laps, year, grand_prix)
 
     return {
         "status": "polling",

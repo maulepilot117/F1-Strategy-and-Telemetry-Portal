@@ -32,6 +32,7 @@ const INITIAL_STATE: LiveRaceState = {
   drivers: {},
   race_control_log: [],
   pit_log: [],
+  strategies: {},
   last_updated: null,
   connected_to_openf1: false,
   polling_active: false,

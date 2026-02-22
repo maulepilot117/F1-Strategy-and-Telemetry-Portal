@@ -115,12 +115,18 @@ export async function fetchLiveDrivers(
 /** Start live race tracking (polling OpenF1) for a session.
  *
  * Idempotent — if already polling the same session, returns current status.
+ * Passes year and grandPrix so the backend can recalculate strategies
+ * mid-race using practice degradation data for the circuit.
  */
 export async function startLiveTracking(
   sessionKey: number,
   totalLaps: number,
+  year?: number,
+  grandPrix?: string,
 ): Promise<{ status: string; session_key: number; total_laps: number; drivers: number }> {
   const params = new URLSearchParams({ total_laps: totalLaps.toString() });
+  if (year !== undefined) params.set("year", year.toString());
+  if (grandPrix !== undefined) params.set("grand_prix", grandPrix);
   const res = await fetch(
     `${BASE}/api/live/start/${sessionKey}?${params}`,
     { method: "POST" },

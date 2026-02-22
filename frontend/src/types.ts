@@ -133,6 +133,17 @@ export interface PitEvent {
   date: string | null;
 }
 
+/** A single recommended strategy from mid-race recalculation */
+export interface LiveStrategy {
+  name: string;
+  total_time_s: number;
+  num_stops: number;
+  pit_laps: number[];
+  stints: Stint[];
+  rank: number;
+  gap_to_best_s: number;
+}
+
 /** Full race state — this is what the SSE stream sends */
 export interface LiveRaceState {
   session_key: number | null;
@@ -143,6 +154,8 @@ export interface LiveRaceState {
   drivers: Record<number, LiveDriver>;
   race_control_log: RaceControlMessage[];
   pit_log: PitEvent[];
+  /** Per-driver strategy recommendations (keyed by driver_number) */
+  strategies: Record<number, LiveStrategy[]>;
   last_updated: string | null;
   connected_to_openf1: boolean;
   polling_active: boolean;

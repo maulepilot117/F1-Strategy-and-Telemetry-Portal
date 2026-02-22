@@ -5,6 +5,11 @@ Polls OpenF1 endpoints for real-time race data (positions, pit stops,
 tyre stints, race control messages) and maintains a module-level state
 dict that the SSE endpoint streams to connected frontends.
 
+Phase 2 additions: after each polling cycle, the engine recalculates
+optimal strategies for all drivers whenever a pit event or SC status
+change is detected.  Results are cached in _race_state["strategies"]
+keyed by driver number, and the frontend filters to the selected team.
+
 Key design decisions:
 - Module-level functions + shared state dict (no classes) — matches codebase convention
 - Single uvicorn worker required (--workers 1) because _race_state is in-process memory
@@ -18,7 +23,19 @@ from datetime import datetime, timezone
 
 import httpx
 
+from f1_strat.strategy import StrategyEngine
+
 logger = logging.getLogger(__name__)
+
+# Strategy engine — shared instance for mid-race recalculation.
+# Initialized once because StrategyEngine.__init__ sets up the FastF1 cache.
+_strategy_engine = StrategyEngine()
+
+# Recalculation coalescing flags.  _is_calculating prevents overlapping
+# recalculations.  _needs_recalc queues a follow-up recalculation if a
+# trigger fires while a calculation is already running.
+_is_calculating: bool = False
+_needs_recalc: bool = False
 
 # ---------------------------------------------------------------------------
 # OpenF1 API base URL
@@ -136,9 +153,12 @@ def _empty_state() -> dict:
         "drivers": {},              # keyed by driver_number (int)
         "race_control_log": [],     # last 50 messages
         "pit_log": [],              # all pit events this session
+        "strategies": {},           # keyed by driver_number (int) → top 3 strategies
         "last_updated": None,       # ISO timestamp
         "connected_to_openf1": False,
         "polling_active": False,
+        "year": None,               # stored for recalculation
+        "grand_prix": None,         # stored for recalculation
     }
 
 
@@ -325,6 +345,83 @@ def _update_current_lap() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Strategy recalculation — triggered by pit events or SC changes
+# ---------------------------------------------------------------------------
+
+async def _maybe_recalculate() -> None:
+    """Recalculate strategies for all drivers if conditions changed.
+
+    Uses try/finally to ensure _is_calculating is always cleared — if
+    calculate_remaining() raises, a stuck flag would freeze all future
+    recalculations.
+
+    The _needs_recalc / _is_calculating pattern coalesces multiple triggers
+    that fire in quick succession (e.g., multiple pit stops on the same lap)
+    into a single recalculation pass.
+    """
+    global _is_calculating, _needs_recalc
+
+    if _is_calculating:
+        # Already running — queue a follow-up recalculation
+        _needs_recalc = True
+        return
+
+    _is_calculating = True
+    try:
+        year = _race_state.get("year")
+        grand_prix = _race_state.get("grand_prix")
+        current_lap = _race_state.get("current_lap", 0)
+        total_laps = _race_state.get("total_laps", 0)
+
+        if not year or not grand_prix or current_lap < 1 or total_laps < 1:
+            return
+
+        strategies_by_driver: dict[int, list] = {}
+
+        for driver_num, driver in _race_state["drivers"].items():
+            compound = driver.get("current_compound", "UNKNOWN")
+            if compound == "UNKNOWN":
+                continue
+
+            try:
+                result = _strategy_engine.calculate_remaining(
+                    year=year,
+                    grand_prix=grand_prix,
+                    current_lap=current_lap,
+                    race_laps=total_laps,
+                    current_compound=compound,
+                    tyre_age=driver.get("tyre_age", 0),
+                    stops_completed=driver.get("stops_completed", 0),
+                    compounds_used=driver.get("compounds_used", []),
+                    max_stops=2,
+                )
+                # Store the top 3 strategies for this driver
+                top = result.get("strategies", [])[:3]
+                strategies_by_driver[driver_num] = top
+            except Exception as e:
+                logger.warning(
+                    "Strategy recalc failed for driver %s: %s",
+                    driver_num, e,
+                )
+
+        _race_state["strategies"] = strategies_by_driver
+        logger.info(
+            "Recalculated strategies for %d drivers (lap %d/%d)",
+            len(strategies_by_driver), current_lap, total_laps,
+        )
+
+    finally:
+        _is_calculating = False
+
+        # If another trigger arrived while we were calculating, run again.
+        # Clear the flag BEFORE the recursive call to avoid missing a
+        # trigger that arrives during the second calculation.
+        if _needs_recalc:
+            _needs_recalc = False
+            await _maybe_recalculate()
+
+
+# ---------------------------------------------------------------------------
 # Polling loop
 # ---------------------------------------------------------------------------
 
@@ -361,7 +458,12 @@ def _track_latest_timestamp(data: list[dict], endpoint_key: str) -> None:
         _last_timestamps[endpoint_key] = max(dates)
 
 
-async def start_polling(session_key: int, total_laps: int) -> None:
+async def start_polling(
+    session_key: int,
+    total_laps: int,
+    year: int | None = None,
+    grand_prix: str | None = None,
+) -> None:
     """Start the background polling loop for a race session.
 
     Polls all 5 OpenF1 endpoints in round-robin at ~8s intervals.
@@ -386,6 +488,10 @@ async def start_polling(session_key: int, total_laps: int) -> None:
     _race_state["session_key"] = session_key
     _race_state["total_laps"] = total_laps
     _race_state["polling_active"] = True
+    # Store year/grand_prix for mid-race strategy recalculation.
+    # These are needed by calculate_remaining() to load practice deg data.
+    _race_state["year"] = year
+    _race_state["grand_prix"] = grand_prix
 
     # Reset incremental timestamps
     for key in _last_timestamps:
@@ -449,6 +555,12 @@ async def _poll_loop(session_key: int) -> None:
             logger.info("Rate limit backoff: waiting %.0fs", _backoff_seconds)
             await asyncio.sleep(_backoff_seconds)
 
+        # Track whether any strategy-relevant changes occurred this cycle.
+        # Pit events and SC status changes both warrant a recalculation
+        # because they affect the optimal remaining strategy.
+        sc_before = _race_state["is_safety_car"]
+        pit_count_before = len(_race_state["pit_log"])
+
         # Poll each endpoint
         for key, path, updater in endpoints:
             if not _race_state["polling_active"]:
@@ -479,6 +591,17 @@ async def _poll_loop(session_key: int) -> None:
 
         # Mark the state as updated
         _race_state["last_updated"] = datetime.now(timezone.utc).isoformat()
+
+        # Trigger strategy recalculation if something strategy-relevant changed:
+        # 1. New pit events (a driver pitted → different compound/tyre age)
+        # 2. SC status change (SC deployed or ended → affects optimal strategy)
+        # 3. First cycle (no strategies calculated yet)
+        sc_changed = _race_state["is_safety_car"] != sc_before
+        new_pits = len(_race_state["pit_log"]) > pit_count_before
+        no_strategies_yet = not _race_state.get("strategies")
+
+        if (sc_changed or new_pits or no_strategies_yet) and _race_state["current_lap"] > 0:
+            await _maybe_recalculate()
 
         # Check if race is finished
         if (

@@ -1395,3 +1395,328 @@ class TestCompoundOffsets:
                     f"{compound} offset changed with deg_scaling: "
                     f"0.85={offsets_85[compound]}, 1.0={offsets_100[compound]}"
                 )
+
+
+# ------------------------------------------------------------------
+# Mid-race recalculation tests (Phase 2: live tracking)
+# ------------------------------------------------------------------
+
+class TestCalculateRemaining:
+    """Verify the calculate_remaining() method for mid-race strategy
+    recalculation during live race tracking.
+    """
+
+    @pytest.fixture(scope="class")
+    def engine(self):
+        return StrategyEngine()
+
+    def test_basic_remaining_strategies(self, engine):
+        """Mid-race recalculation should produce valid strategies."""
+        result = engine.calculate_remaining(
+            year=2024,
+            grand_prix="Spain",
+            current_lap=30,
+            race_laps=66,
+            current_compound="MEDIUM",
+            tyre_age=10,
+            stops_completed=1,
+            compounds_used=["SOFT", "MEDIUM"],
+        )
+        assert result["remaining_laps"] == 36
+        assert result["current_lap"] == 30
+        assert len(result["strategies"]) > 0, "Should produce at least one strategy"
+
+    def test_stints_cover_remaining_laps(self, engine):
+        """Every strategy's stints should sum to the remaining laps."""
+        result = engine.calculate_remaining(
+            year=2024,
+            grand_prix="Spain",
+            current_lap=30,
+            race_laps=66,
+            current_compound="HARD",
+            tyre_age=5,
+            stops_completed=1,
+            compounds_used=["MEDIUM", "HARD"],
+        )
+        remaining = result["remaining_laps"]
+        for strat in result["strategies"]:
+            total = sum(s["laps"] for s in strat["stints"])
+            assert total == remaining, (
+                f"'{strat['name']}' stints sum to {total}, not {remaining}"
+            )
+
+    def test_stints_start_from_current_lap(self, engine):
+        """First stint should start at current_lap + 1 (next lap)."""
+        result = engine.calculate_remaining(
+            year=2024,
+            grand_prix="Spain",
+            current_lap=40,
+            race_laps=66,
+            current_compound="MEDIUM",
+            tyre_age=15,
+            stops_completed=1,
+            compounds_used=["SOFT", "MEDIUM"],
+        )
+        for strat in result["strategies"]:
+            assert strat["stints"][0]["start_lap"] == 41, (
+                f"First stint should start at lap 41, got {strat['stints'][0]['start_lap']}"
+            )
+            assert strat["stints"][-1]["end_lap"] == 66, (
+                f"Last stint should end at lap 66, got {strat['stints'][-1]['end_lap']}"
+            )
+
+    def test_diversity_already_satisfied(self, engine):
+        """When 2+ compounds already used, a no-stop strategy (single compound)
+        should be legal because FIA diversity is already satisfied.
+
+        Use few remaining laps (3) so the 0-stop strategy is competitive
+        enough to appear in the top 10 results — with many laps left,
+        old-tyre degradation makes staying out slower than every pit option.
+        """
+        result = engine.calculate_remaining(
+            year=2024,
+            grand_prix="Spain",
+            current_lap=63,
+            race_laps=66,
+            current_compound="HARD",
+            tyre_age=10,
+            stops_completed=1,
+            compounds_used=["MEDIUM", "HARD"],
+        )
+        # Should have a 0-additional-stop strategy (stay on HARD)
+        stop_counts = {s["num_stops"] for s in result["strategies"]}
+        assert 0 in stop_counts, (
+            f"Expected a 0-stop remaining strategy but got: {stop_counts}"
+        )
+
+    def test_diversity_forces_compound_change(self, engine):
+        """When only 1 compound used so far, strategies must include a
+        different compound to satisfy FIA 2-compound rule.
+        """
+        result = engine.calculate_remaining(
+            year=2024,
+            grand_prix="Spain",
+            current_lap=15,
+            race_laps=66,
+            current_compound="MEDIUM",
+            tyre_age=15,
+            stops_completed=0,
+            compounds_used=["MEDIUM"],
+        )
+        # All strategies should include at least one compound different from MEDIUM
+        for strat in result["strategies"]:
+            compounds_in_strat = {s["compound"] for s in strat["stints"]}
+            all_compounds = {"MEDIUM"} | compounds_in_strat
+            assert len(all_compounds) >= 2, (
+                f"'{strat['name']}' only uses {compounds_in_strat} with "
+                f"compounds_used=['MEDIUM'] — needs 2+ distinct compounds"
+            )
+
+    def test_race_nearly_over(self, engine):
+        """With only a few laps remaining, should still produce strategies."""
+        result = engine.calculate_remaining(
+            year=2024,
+            grand_prix="Spain",
+            current_lap=62,
+            race_laps=66,
+            current_compound="HARD",
+            tyre_age=30,
+            stops_completed=1,
+            compounds_used=["MEDIUM", "HARD"],
+        )
+        assert result["remaining_laps"] == 4
+        assert len(result["strategies"]) > 0
+
+    def test_race_finished_returns_empty(self, engine):
+        """After the race is over, should return empty strategies."""
+        result = engine.calculate_remaining(
+            year=2024,
+            grand_prix="Spain",
+            current_lap=66,
+            race_laps=66,
+            current_compound="HARD",
+            tyre_age=30,
+            stops_completed=1,
+            compounds_used=["MEDIUM", "HARD"],
+        )
+        assert result["remaining_laps"] == 0
+        assert len(result["strategies"]) == 0
+
+    def test_strategies_are_ranked(self, engine):
+        """Mid-race strategies should be ranked by total time."""
+        result = engine.calculate_remaining(
+            year=2024,
+            grand_prix="Spain",
+            current_lap=25,
+            race_laps=66,
+            current_compound="SOFT",
+            tyre_age=25,
+            stops_completed=0,
+            compounds_used=["SOFT"],
+        )
+        times = [s["total_time_s"] for s in result["strategies"]]
+        assert times == sorted(times), "Strategies not sorted by total time"
+
+    def test_pit_laps_present(self, engine):
+        """Strategies with stops should include pit_laps."""
+        result = engine.calculate_remaining(
+            year=2024,
+            grand_prix="Spain",
+            current_lap=20,
+            race_laps=66,
+            current_compound="MEDIUM",
+            tyre_age=20,
+            stops_completed=0,
+            compounds_used=["MEDIUM"],
+        )
+        for strat in result["strategies"]:
+            if strat["num_stops"] > 0:
+                assert len(strat["pit_laps"]) == strat["num_stops"], (
+                    f"'{strat['name']}' has {strat['num_stops']} stops but "
+                    f"{len(strat['pit_laps'])} pit_laps"
+                )
+                # Pit laps should be within the remaining race laps
+                for lap in strat["pit_laps"]:
+                    assert 20 < lap < 66, (
+                        f"Pit lap {lap} outside remaining race range (21-65)"
+                    )
+
+    def test_print_remaining_summary(self, engine):
+        """Print a summary of mid-race strategies for visual inspection."""
+        result = engine.calculate_remaining(
+            year=2024,
+            grand_prix="Spain",
+            current_lap=30,
+            race_laps=66,
+            current_compound="MEDIUM",
+            tyre_age=10,
+            stops_completed=1,
+            compounds_used=["SOFT", "MEDIUM"],
+        )
+        print("\n" + "=" * 70)
+        print(f"  Mid-race recalculation: {result['event_name']} {result['year']}")
+        print(f"  Current lap: {result['current_lap']}/{result['race_laps']} "
+              f"({result['remaining_laps']} remaining)")
+        print(f"  On: {result['current_compound']} (age {result['tyre_age']})")
+        print(f"  Stops done: {result['stops_completed']}")
+        print(f"  Compounds used: {result['compounds_used']}")
+        print(f"  Strategies: {len(result['strategies'])}")
+        print("=" * 70)
+
+        for strat in result["strategies"][:5]:
+            gap = (f"+{strat['gap_to_best_s']:.1f}s"
+                   if strat["gap_to_best_s"] > 0 else "OPTIMAL")
+            print(f"\n  #{strat['rank']:2d}  {strat['name']}  ({gap})")
+            for stint in strat["stints"]:
+                print(f"       {stint['compound']:6s}  L{stint['start_lap']:2d}-{stint['end_lap']:2d} "
+                      f"({stint['laps']} laps)")
+            if strat["pit_laps"]:
+                print(f"       Pit: {', '.join(f'lap {l}' for l in strat['pit_laps'])}")
+
+        print("\n" + "=" * 70)
+
+
+class TestSimulateRaceMidRace:
+    """Verify the start_lap and initial_tyre_age parameters on _simulate_race.
+
+    These tests use synthetic deg rates so they don't need network calls.
+    """
+
+    @pytest.fixture(scope="class")
+    def engine(self):
+        return StrategyEngine()
+
+    def test_start_lap_affects_fuel_correction(self, engine):
+        """Mid-race simulation should account for fuel already burned.
+
+        With start_lap=30 (30 laps completed), the fuel correction should
+        start from 30 laps of burn-off, making the car lighter from lap 1.
+        """
+        rates = _flat_to_coeffs({"MEDIUM": 0.10})
+        # Full race from lap 1
+        full_time = engine._simulate_race(
+            ("MEDIUM",), [36], 80.0, rates, 0.055, 22.0, 66,
+            start_lap=0, initial_tyre_age=0,
+        )
+        # Same 36 laps but starting from lap 30
+        mid_time = engine._simulate_race(
+            ("MEDIUM",), [36], 80.0, rates, 0.055, 22.0, 66,
+            start_lap=30, initial_tyre_age=0,
+        )
+        # Mid-race should be faster because fuel is lighter
+        # (30 laps of burn-off = 30 × 0.055 = 1.65s/lap advantage at start)
+        assert mid_time < full_time, (
+            f"Mid-race ({mid_time:.1f}s) should be faster than fresh start "
+            f"({full_time:.1f}s) due to fuel burn-off"
+        )
+
+    def test_initial_tyre_age_increases_degradation(self, engine):
+        """Starting with worn tyres should cost more than fresh tyres."""
+        rates = _flat_to_coeffs({"HARD": 0.06})
+        # Fresh tyres (age 0)
+        fresh_time = engine._simulate_race(
+            ("HARD",), [20], 80.0, rates, 0.055, 22.0, 66,
+            start_lap=30, initial_tyre_age=0,
+        )
+        # Worn tyres (age 20 — been on for 20 laps already)
+        worn_time = engine._simulate_race(
+            ("HARD",), [20], 80.0, rates, 0.055, 22.0, 66,
+            start_lap=30, initial_tyre_age=20,
+        )
+        # Worn should be slower because tyre_age is 21-40 instead of 1-20
+        assert worn_time > fresh_time, (
+            f"Worn tyres ({worn_time:.1f}s) should be slower than fresh "
+            f"({fresh_time:.1f}s) due to higher tyre age"
+        )
+
+    def test_no_first_stint_bonus_mid_race(self, engine):
+        """Mid-race (start_lap > 0) should NOT get the first-stint bonus.
+
+        The field is spread out mid-race, so starting on softer compound
+        doesn't give the same clean-air advantage.
+        """
+        rates = _flat_to_coeffs({"MEDIUM": 0.10, "HARD": 0.06})
+        # Full race: MEDIUM gets first-stint bonus
+        full_mh = engine._simulate_race(
+            ("MEDIUM", "HARD"), [20, 16], 80.0, rates, 0.055, 22.0, 66,
+            start_lap=0,
+        )
+        full_hm = engine._simulate_race(
+            ("HARD", "MEDIUM"), [20, 16], 80.0, rates, 0.055, 22.0, 66,
+            start_lap=0,
+        )
+        # Mid-race: no first-stint bonus, so ordering shouldn't matter as much
+        mid_mh = engine._simulate_race(
+            ("MEDIUM", "HARD"), [20, 16], 80.0, rates, 0.055, 22.0, 66,
+            start_lap=30,
+        )
+        mid_hm = engine._simulate_race(
+            ("HARD", "MEDIUM"), [20, 16], 80.0, rates, 0.055, 22.0, 66,
+            start_lap=30,
+        )
+        # Full race: M→H should beat H→M (first-stint bonus)
+        full_gap = full_hm - full_mh
+        # Mid-race: gap should be smaller (no first-stint bonus)
+        mid_gap = mid_hm - mid_mh
+        assert mid_gap < full_gap, (
+            f"Mid-race ordering gap ({mid_gap:.2f}s) should be smaller than "
+            f"full-race gap ({full_gap:.2f}s) because first-stint bonus is skipped"
+        )
+
+    def test_backward_compatibility(self, engine):
+        """start_lap=0 and initial_tyre_age=0 should produce identical
+        results to the existing behavior (no parameters passed).
+        """
+        rates = _flat_to_coeffs({"MEDIUM": 0.10, "HARD": 0.06})
+        # Without new params
+        old_time = engine._simulate_race(
+            ("MEDIUM", "HARD"), [30, 36], 80.0, rates, 0.055, 22.0, 66,
+        )
+        # With explicit defaults
+        new_time = engine._simulate_race(
+            ("MEDIUM", "HARD"), [30, 36], 80.0, rates, 0.055, 22.0, 66,
+            start_lap=0, initial_tyre_age=0,
+        )
+        assert abs(old_time - new_time) < 0.01, (
+            f"Default params should match old behavior: {old_time:.1f} vs {new_time:.1f}"
+        )

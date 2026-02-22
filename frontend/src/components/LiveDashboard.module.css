@@ -188,6 +188,114 @@
   font-size: 0.8rem;
 }
 
+/* ---- Strategy recommendations ---- */
+
+.strategyGrid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+}
+
+@media (max-width: 640px) {
+  .strategyGrid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.strategyPanel {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 16px;
+}
+
+.strategyHeader {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 12px;
+  padding-bottom: 8px;
+  border-bottom: 2px solid var(--border);
+}
+
+.strategyDriverLabel {
+  font-size: 1rem;
+  font-weight: 700;
+}
+
+.strategyTitle {
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-secondary);
+}
+
+.strategyCard {
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.82rem;
+}
+
+.strategyCard:last-child {
+  border-bottom: none;
+}
+
+.strategyRank {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.rankBadge {
+  font-weight: 700;
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+  min-width: 20px;
+}
+
+.strategyName {
+  font-weight: 600;
+}
+
+.strategyGap {
+  color: var(--text-secondary);
+  font-size: 0.75rem;
+  margin-left: auto;
+}
+
+.strategyStints {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+  margin-top: 4px;
+}
+
+.strategyStint {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.pitArrow {
+  color: var(--text-secondary);
+  margin: 0 2px;
+}
+
+.stintLaps {
+  font-size: 0.72rem;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.pitWindow {
+  font-size: 0.72rem;
+  color: var(--text-secondary);
+  margin-top: 4px;
+}
+
 /* ---- Race control log ---- */
 
 .raceControlSection {
