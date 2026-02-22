@@ -16,12 +16,16 @@ cleanup() {
 }
 trap cleanup SIGTERM SIGINT
 
-# Start the FastAPI backend (2 workers handles concurrent requests;
-# more isn't needed since FastF1 calls are I/O-bound, not CPU-bound)
+# Start the FastAPI backend with 1 worker.  The live race tracking
+# feature uses module-level state (a dict shared between the polling
+# task and SSE endpoints).  With 2+ workers, each worker is a separate
+# process with its own copy of the state — the polling loop would run
+# in one worker but SSE requests might land on another (with empty state).
+# Single worker is fine for a fan tool on a home Kubernetes lab.
 PYTHONPATH=/app/backend uvicorn f1_strat.api:app \
     --host 0.0.0.0 \
     --port 8000 \
-    --workers 2 &
+    --workers 1 &
 UVICORN_PID=$!
 
 # Start nginx in the foreground (daemon off) so Docker sees it as

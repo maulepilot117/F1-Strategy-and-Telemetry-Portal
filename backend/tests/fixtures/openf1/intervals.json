@@ -1,0 +1,5 @@
+[
+  {"session_key": 9539, "meeting_key": 1238, "date": "2024-06-23T13:03:27+00:00", "driver_number": 1, "gap_to_leader": 0.0, "interval": 0.0},
+  {"session_key": 9539, "meeting_key": 1238, "date": "2024-06-23T13:03:27+00:00", "driver_number": 4, "gap_to_leader": 3.456, "interval": 3.456},
+  {"session_key": 9539, "meeting_key": 1238, "date": "2024-06-23T13:03:27+00:00", "driver_number": 81, "gap_to_leader": 12.89, "interval": 2.1}
+]

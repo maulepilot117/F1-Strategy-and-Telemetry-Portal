@@ -5,9 +5,17 @@ import RaceSelector from "./components/RaceSelector";
 import DegradationChart from "./components/DegradationChart";
 import StrategyControls from "./components/StrategyControls";
 import StrategyList from "./components/StrategyList";
+import LiveDashboard from "./components/LiveDashboard";
 import styles from "./App.module.css";
 
+/** The two modes the app can be in — "analysis" is the original view,
+ *  "live" is the real-time race tracking dashboard. */
+type AppMode = "analysis" | "live";
+
 export default function App() {
+  // -- App mode: "analysis" (default) or "live" --
+  const [mode, setMode] = useState<AppMode>("analysis");
+
   // -- Race selection state --
   const [year, setYear] = useState(2024);
   const [schedule, setSchedule] = useState<ScheduleEvent[]>([]);
@@ -118,73 +126,99 @@ export default function App() {
 
   return (
     <div className={styles.app}>
-      {/* Page header */}
+      {/* Page header with mode toggle */}
       <header className={styles.header}>
-        <h1 className={styles.title}>F1 Race Strategy</h1>
+        <div className={styles.headerRow}>
+          {/* Mode toggle — pill-style buttons to switch between Analysis and Live */}
+          <div className={styles.modeToggle}>
+            <button
+              className={`${styles.modeButton} ${mode === "analysis" ? styles.modeActive : ""}`}
+              onClick={() => setMode("analysis")}
+            >
+              Analysis
+            </button>
+            <button
+              className={`${styles.modeButton} ${mode === "live" ? styles.modeActive : ""}`}
+              onClick={() => setMode("live")}
+            >
+              Live
+            </button>
+          </div>
+          <h1 className={styles.title}>F1 Race Strategy</h1>
+        </div>
         <p className={styles.subtitle}>
-          Analyze tyre degradation and build pit stop strategies from real practice data
+          {mode === "analysis"
+            ? "Analyze tyre degradation and build pit stop strategies from real practice data"
+            : "Track a live race session with real-time driver telemetry"}
         </p>
       </header>
 
-      {/* Race selector: year + GP dropdowns + Analyze button */}
-      <RaceSelector
-        year={year}
-        onYearChange={setYear}
-        schedule={schedule}
-        grandPrix={grandPrix}
-        onGrandPrixChange={setGrandPrix}
-        onAnalyze={handleAnalyze}
-        loading={loadingDeg}
-      />
-
-      {/* Error banner */}
-      {error && <div className={styles.error}>{error}</div>}
-
-      {/* Loading indicator for degradation */}
-      {loadingDeg && (
-        <p className={styles.loading}>
-          Loading practice data... (first load takes 1-2 minutes)
-        </p>
-      )}
-
-      {/* Degradation chart — shows after Analyze is clicked */}
-      {degradation && (
-        <div className={styles.section}>
-          <DegradationChart data={degradation} />
-        </div>
-      )}
-
-      {/* Strategy controls — only show when degradation data exists */}
-      {degradation && (
-        <div className={styles.section}>
-          <div className={styles.sectionLabel}>Strategy Parameters</div>
-          <StrategyControls
-            raceLaps={raceLaps}
-            onRaceLapsChange={setRaceLaps}
-            pitStopLoss={pitStopLoss}
-            onPitStopLossChange={setPitStopLoss}
-            onCalculate={handleCalculateStrategy}
-            loading={loadingStrat}
-            weatherWindows={weatherWindows}
-            onWeatherWindowsChange={setWeatherWindows}
-            raceDataLaps={degradation?.race_laps}
-            raceDataPitLoss={degradation?.avg_pit_stop_loss_s}
+      {/* Conditionally render the active mode */}
+      {mode === "live" ? (
+        <LiveDashboard />
+      ) : (
+        <>
+          {/* Race selector: year + GP dropdowns + Analyze button */}
+          <RaceSelector
+            year={year}
+            onYearChange={setYear}
+            schedule={schedule}
+            grandPrix={grandPrix}
+            onGrandPrixChange={setGrandPrix}
+            onAnalyze={handleAnalyze}
+            loading={loadingDeg}
           />
-        </div>
-      )}
 
-      {/* Loading indicator for strategy */}
-      {loadingStrat && (
-        <p className={styles.loading}>
-          Calculating strategies... (this can take 30-60 seconds)
-        </p>
-      )}
+          {/* Error banner */}
+          {error && <div className={styles.error}>{error}</div>}
 
-      {/* Strategy list — shows after Calculate is clicked */}
-      {strategyResult && (
-        <div className={styles.section}>
-          <StrategyList data={strategyResult} />
-        </div>
+          {/* Loading indicator for degradation */}
+          {loadingDeg && (
+            <p className={styles.loading}>
+              Loading practice data... (first load takes 1-2 minutes)
+            </p>
+          )}
+
+          {/* Degradation chart — shows after Analyze is clicked */}
+          {degradation && (
+            <div className={styles.section}>
+              <DegradationChart data={degradation} />
+            </div>
+          )}
+
+          {/* Strategy controls — only show when degradation data exists */}
+          {degradation && (
+            <div className={styles.section}>
+              <div className={styles.sectionLabel}>Strategy Parameters</div>
+              <StrategyControls
+                raceLaps={raceLaps}
+                onRaceLapsChange={setRaceLaps}
+                pitStopLoss={pitStopLoss}
+                onPitStopLossChange={setPitStopLoss}
+                onCalculate={handleCalculateStrategy}
+                loading={loadingStrat}
+                weatherWindows={weatherWindows}
+                onWeatherWindowsChange={setWeatherWindows}
+                raceDataLaps={degradation?.race_laps}
+                raceDataPitLoss={degradation?.avg_pit_stop_loss_s}
+              />
+            </div>
+          )}
+
+          {/* Loading indicator for strategy */}
+          {loadingStrat && (
+            <p className={styles.loading}>
+              Calculating strategies... (this can take 30-60 seconds)
+            </p>
+          )}
+
+          {/* Strategy list — shows after Calculate is clicked */}
+          {strategyResult && (
+            <div className={styles.section}>
+              <StrategyList data={strategyResult} />
+            </div>
+          )}
+        </>
       )}
     </div>
   );
