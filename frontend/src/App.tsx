@@ -5,7 +5,7 @@ import RaceSelector from "./components/RaceSelector";
 import DegradationChart from "./components/DegradationChart";
 import StrategyControls from "./components/StrategyControls";
 import StrategyList from "./components/StrategyList";
-import LiveDashboard from "./components/LiveDashboard";
+import TelemetryDashboard from "./components/telemetry/TelemetryDashboard";
 import styles from "./App.module.css";
 
 /** The two modes the app can be in — "analysis" is the original view,
@@ -155,7 +155,7 @@ export default function App() {
 
       {/* Conditionally render the active mode */}
       {mode === "live" ? (
-        <LiveDashboard />
+        <TelemetryDashboard />
       ) : (
         <>
           {/* Race selector: year + GP dropdowns + Analyze button */}

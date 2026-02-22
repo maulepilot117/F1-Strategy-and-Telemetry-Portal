@@ -306,6 +306,8 @@ def _empty_state() -> dict:
         "polling_active": False,
         "year": None,               # stored for recalculation
         "grand_prix": None,         # stored for recalculation
+        "car_data": {},             # keyed by driver_number → telemetry snapshot
+        "telemetry_available": False,  # True when sponsor-tier telemetry is enabled
     }
 
 
@@ -497,6 +499,62 @@ def _update_current_lap() -> None:
         _race_state["current_lap"] = max_lap
 
 
+def _update_from_car_data(records: list[dict]) -> None:
+    """Process car_data records — keep only the latest per driver.
+
+    OpenF1 car_data has high-frequency telemetry:
+      - driver_number, speed (km/h), rpm, n_gear, throttle (0-100),
+        brake (0 or 100), drs (int code), date
+    Records arrive chronologically, so iterating forward and overwriting
+    keeps only the most recent sample per driver.
+    """
+    # Build latest-per-driver map
+    latest: dict[int, dict] = {}
+    for rec in records:
+        driver_num = rec.get("driver_number")
+        if driver_num is None:
+            continue
+        latest[driver_num] = {
+            "speed": rec.get("speed", 0),
+            "rpm": rec.get("rpm", 0),
+            "n_gear": rec.get("n_gear", 0),
+            "throttle": rec.get("throttle", 0),
+            "brake": rec.get("brake", 0),
+            "drs": rec.get("drs", 0),
+        }
+
+    # Merge into car_data — preserve any existing x/y from location
+    for driver_num, data in latest.items():
+        existing = _race_state["car_data"].get(driver_num, {})
+        existing.update(data)
+        _race_state["car_data"][driver_num] = existing
+
+
+def _update_from_location(records: list[dict]) -> None:
+    """Process location records — keep latest (x, y) per driver.
+
+    OpenF1 location data has:
+      - driver_number, x, y, z, date
+    We only need x and y for the track map.  Coordinates are circuit-specific
+    (arbitrary units) — the frontend normalizes them to SVG viewBox range.
+    """
+    latest: dict[int, dict] = {}
+    for rec in records:
+        driver_num = rec.get("driver_number")
+        if driver_num is None:
+            continue
+        latest[driver_num] = {
+            "x": rec.get("x", 0),
+            "y": rec.get("y", 0),
+        }
+
+    # Merge into car_data — preserve telemetry fields from car_data
+    for driver_num, data in latest.items():
+        existing = _race_state["car_data"].get(driver_num, {})
+        existing.update(data)
+        _race_state["car_data"][driver_num] = existing
+
+
 # ---------------------------------------------------------------------------
 # Strategy recalculation — triggered by pit events or SC changes
 # ---------------------------------------------------------------------------
@@ -593,7 +651,14 @@ _last_timestamps: dict[str, str | None] = {
     "pit": None,
     "position": None,
     "intervals": None,
+    "car_data": None,
+    "location": None,
 }
+
+# Gate telemetry behind sponsor tier — car_data + location add 2 extra API
+# calls per cycle, which risks hitting free-tier rate limits.  Sponsor tier
+# has higher limits and faster 4s cycles.
+_TELEMETRY_ENABLED: bool = bool(_OPENF1_USERNAME and _OPENF1_PASSWORD)
 
 
 def _make_since_params(session_key: int, endpoint_key: str) -> dict:
@@ -682,6 +747,9 @@ async def start_polling(
     )
 
     _race_state["connected_to_openf1"] = True
+    # Tell the frontend whether telemetry gauges/track map should render.
+    # Only enabled with sponsor credentials (adds 2 extra API calls per cycle).
+    _race_state["telemetry_available"] = _TELEMETRY_ENABLED
 
     # Launch the polling loop as a background task
     _polling_task = asyncio.create_task(_poll_loop(session_key))
@@ -711,6 +779,15 @@ async def _poll_loop(session_key: int) -> None:
         ("position", "/position", _update_from_positions),
         ("intervals", "/intervals", _update_from_intervals),
     ]
+
+    # Add telemetry endpoints when sponsor credentials are configured.
+    # These add 2 extra API calls per cycle — too many for free tier's
+    # rate limits, but sponsor tier handles them easily at 4s intervals.
+    if _TELEMETRY_ENABLED:
+        endpoints.extend([
+            ("car_data", "/car_data", _update_from_car_data),
+            ("location", "/location", _update_from_location),
+        ])
 
     async def _fetch_endpoint(key: str, path: str) -> tuple[str, list[dict]]:
         """Fetch a single OpenF1 endpoint with incremental since-params."""

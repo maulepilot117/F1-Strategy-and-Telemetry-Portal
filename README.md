@@ -15,16 +15,17 @@ Select any Grand Prix from 2023-2025, and the engine analyzes real practice and 
 - **Per-circuit pit loss** — Circuit-specific pit lane time loss (17s Austria to 27s Singapore) instead of a flat default
 - **Historical stabilization** — Uses 3 years of race data at the same circuit to stabilize degradation curve shapes
 
-### Live Race Tracking
+### Live Race Tracking & Telemetry
 
 Switch to Live mode during a race to follow a team's two drivers in real time:
 
-- **Real-time telemetry** — Position, gap, interval, tyre compound, tyre age, lap times via Server-Sent Events
-- **Team focus** — Select your team and see both drivers side-by-side
+- **Car telemetry** (sponsor tier) — Speed and RPM circular gauges, gear indicator with shift light strip, DRS status, throttle/brake bar gauges, and a speed-over-time chart per driver
+- **Track map** (sponsor tier) — SVG visualization of all 20 driver positions using real OpenF1 coordinates, with the selected team highlighted. Track shape reveals itself naturally from driver positions — no static circuit outlines needed
+- **Team focus** — Select your team and see both drivers side-by-side with position, gap, interval, tyre compound, tyre age, and pit stop history
 - **Mid-race strategy recalculation** — Engine recalculates optimal remaining strategies on every pit stop and safety car change, showing top 3 recommendations per driver
-- **Safety car detection** — SC/VSC status tracked from race control messages
-- **Race control log** — Live feed of flags, safety cars, and race director messages
-- **Pit stop tracking** — Records every pit stop with lap number and duration
+- **Safety car detection** — SC/VSC/red flag status tracked from race control messages with pulsing visual indicators
+- **Race control log** — Collapsible live feed of flags, safety cars, and race director messages
+- **Graceful degradation** — Without sponsor credentials, telemetry gauges and track map are hidden; the dashboard still shows all positional data, tyre info, and strategy recommendations
 
 ## How the Prediction Engine Works
 
@@ -67,7 +68,7 @@ lap_time = base_lap_time
 ## Tech Stack
 
 - **Backend:** Python 3.12, FastAPI, FastF1 (historical F1 data), OpenF1 (live timing), httpx, sse-starlette
-- **Frontend:** React 19, Vite, Recharts, Deno 2.x
+- **Frontend:** React 19, Vite, Tailwind CSS v4, Recharts, Lucide React, Deno 2.x
 - **Deployment:** Single Docker container — nginx serves the React build and reverse-proxies `/api/*` to uvicorn
 
 ## Quick Start with Docker
@@ -94,7 +95,7 @@ docker run -d --name f1-strat -p 3000:80 \
   -v f1_cache:/app/backend/.fastf1_cache f1-strat
 ```
 
-With credentials set, the backend exchanges them for a bearer token (valid 1 hour, auto-refreshed) and polls at 4-second intervals instead of 8. If authentication fails, it falls back to the free tier automatically — wrong credentials won't crash anything.
+With credentials set, the backend exchanges them for a bearer token (valid 1 hour, auto-refreshed) and polls at 4-second intervals instead of 8. It also enables car telemetry and location endpoints for the speed/RPM gauges and track map. If authentication fails, it falls back to the free tier automatically — wrong credentials won't crash anything.
 
 ## Local Development
 
@@ -195,7 +196,19 @@ f1_strat/
             ├── StrategyList.tsx          # Ranked strategy results
             ├── StrategyTimeline.tsx      # Visual stint timeline
             ├── WeatherScenarioBuilder.tsx # Weather window editor
-            └── LiveDashboard.tsx         # Live race tracking view
+            └── telemetry/               # Live telemetry dashboard (Tailwind)
+                ├── TelemetryDashboard.tsx  # Main view (selection + connected states)
+                ├── DriverPanel.tsx         # Per-driver gauges + positional data
+                ├── CircularGauge.tsx       # SVG arc gauge (speed, RPM)
+                ├── BarGauge.tsx            # Skewed bar gauge (throttle, brake)
+                ├── GearDisplay.tsx         # Gear number + shift lights
+                ├── DRSIndicator.tsx        # DRS open/eligible/off badge
+                ├── TyreCompound.tsx        # Compound badge + tyre age
+                ├── TelemetryChart.tsx      # Speed-over-time line chart
+                ├── TrackMap.tsx            # SVG driver positions map
+                ├── LapDelta.tsx           # Gap between team drivers
+                ├── RaceStatusBadge.tsx     # Green/SC/VSC/red flag
+                └── TeamSelector.tsx        # Team dropdown with colour swatch
 ```
 
 ## Live Tracking Architecture
@@ -204,12 +217,14 @@ The live tracking system polls the [OpenF1 API](https://openf1.org) and pushes s
 
 ```
 OpenF1 API  →  Backend polling loop (4s sponsor / 8s free)  →  Module-level state dict
-                                                            ↓
-                                                    Strategy recalculation
-                                                    (triggered by pit events
-                                                     and SC/VSC changes)
-                                                            ↓
-Browser  ←  SSE (EventSourceResponse)  ←  Full state snapshot + strategy recommendations
+  positions, pits, stints, race control, intervals               ↓
+  + car_data, location (sponsor tier only)              Strategy recalculation
+                                                        (triggered by pit events
+                                                         and SC/VSC changes)
+                                                                 ↓
+Browser  ←  SSE (EventSourceResponse)  ←  Full state snapshot + strategies + telemetry
+  ↓
+  Telemetry history accumulated client-side (ring buffer, max 60 samples/driver)
 ```
 
 - **Single worker** — `--workers 1` because race state lives in module-level memory

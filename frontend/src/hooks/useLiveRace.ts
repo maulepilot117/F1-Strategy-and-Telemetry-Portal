@@ -15,8 +15,8 @@
  *   - The server sends keepalive comments every 15s during quiet periods
  */
 
-import { useEffect, useSyncExternalStore } from "react";
-import type { LiveRaceState } from "../types";
+import { useCallback, useEffect, useMemo, useSyncExternalStore } from "react";
+import type { LiveRaceState, TelemetryData } from "../types";
 
 // ---------------------------------------------------------------------------
 // Module-level state store — shared across all components using this hook
@@ -36,9 +36,23 @@ const INITIAL_STATE: LiveRaceState = {
   last_updated: null,
   connected_to_openf1: false,
   polling_active: false,
+  car_data: {},
+  telemetry_available: false,
   connected: false,
   lastUpdate: 0,
 };
+
+// ---------------------------------------------------------------------------
+// Telemetry history — accumulated client-side from SSE snapshots
+// ---------------------------------------------------------------------------
+
+/** Max number of telemetry samples to keep per driver (at ~4-8s polling,
+ *  60 samples = ~4-8 minutes of chart data) */
+const MAX_HISTORY = 60;
+
+/** Per-driver ring buffer of telemetry snapshots with timestamps.
+ *  Accumulated in onmessage — resets when the SSE connection resets. */
+const telemetryHistory: Map<number, Array<TelemetryData & { ts: number }>> = new Map();
 
 let state: LiveRaceState = { ...INITIAL_STATE };
 
@@ -81,6 +95,27 @@ function connectToRace(sessionKey: number): () => void {
       connected: true,
       lastUpdate: Date.now(),
     };
+
+    // Accumulate telemetry history for charts — one snapshot per SSE message.
+    // Each driver's car_data is pushed into a ring buffer (max MAX_HISTORY).
+    const carData = data.car_data as Record<number, TelemetryData> | undefined;
+    if (carData) {
+      const now = Date.now();
+      for (const [driverStr, td] of Object.entries(carData)) {
+        const driverNum = Number(driverStr);
+        let hist = telemetryHistory.get(driverNum);
+        if (!hist) {
+          hist = [];
+          telemetryHistory.set(driverNum, hist);
+        }
+        hist.push({ ...td, ts: now });
+        // Trim to ring buffer size
+        if (hist.length > MAX_HISTORY) {
+          hist.splice(0, hist.length - MAX_HISTORY);
+        }
+      }
+    }
+
     emitChange();
   };
 
@@ -103,6 +138,7 @@ function connectToRace(sessionKey: number): () => void {
     es.close();
     eventSource = null;
     state = { ...INITIAL_STATE };
+    telemetryHistory.clear();
     emitChange();
   };
 }
@@ -139,4 +175,33 @@ export function useLiveRace(sessionKey: number | null): LiveRaceState {
     },
     () => state,
   );
+}
+
+/**
+ * Get the telemetry history for a specific driver.
+ *
+ * Returns up to MAX_HISTORY snapshots accumulated from SSE messages.
+ * Re-renders whenever the SSE state changes (which means new data arrived).
+ * History resets on page refresh — acceptable for a real-time dashboard.
+ */
+export function useTelemetryHistory(
+  driverNumber: number | null,
+): Array<TelemetryData & { ts: number }> {
+  // Subscribe to the same external store so we re-render on new SSE data.
+  // We read from the module-level telemetryHistory map (populated in onmessage).
+  const subscribe = useCallback((callback: () => void) => {
+    listeners.add(callback);
+    return () => listeners.delete(callback);
+  }, []);
+
+  const getSnapshot = useCallback(() => {
+    if (!driverNumber) return [];
+    return telemetryHistory.get(driverNumber) ?? [];
+  }, [driverNumber]);
+
+  const history = useSyncExternalStore(subscribe, getSnapshot);
+
+  // Memoize a copy so downstream components get a stable reference
+  // when no new data has arrived.
+  return useMemo(() => [...history], [history]);
 }

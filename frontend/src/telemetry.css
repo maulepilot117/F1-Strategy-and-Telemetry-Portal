@@ -1,0 +1,26 @@
+/* Tailwind v4 entry point for the telemetry dashboard.
+   @theme defines custom design tokens that generate utility classes
+   like bg-f1-black, text-f1-muted, font-f1, etc.
+   Only imported by components under components/telemetry/ —
+   existing CSS Modules are unaffected. */
+
+@import "tailwindcss";
+
+@theme {
+  --color-f1-black: #15151E;
+  --color-f1-dark: #1E1E2E;
+  --color-f1-card: #0F0F1A;
+  --color-f1-red: #E8002D;
+  --color-f1-border: #2A2A3E;
+  --color-f1-muted: #9CA3AF;
+  --color-f1-green: #00D2BE;
+  --color-f1-yellow: #FFD700;
+  --color-f1-orange: #FFA500;
+  --color-f1-white: #FFFFFF;
+
+  --font-f1: "Barlow Condensed", sans-serif;
+  --font-mono: "JetBrains Mono", monospace;
+
+  --animate-pulse-fast: pulse 1.5s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+  --animate-spin-slow: spin 8s linear infinite;
+}

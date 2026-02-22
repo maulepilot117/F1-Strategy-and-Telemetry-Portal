@@ -96,6 +96,30 @@ export interface StrategyRequest {
 }
 
 // ---------------------------------------------------------------------------
+// Telemetry types (car_data + location from OpenF1)
+// ---------------------------------------------------------------------------
+
+/** Real-time telemetry snapshot for a single driver.
+ *  Populated from OpenF1 car_data (speed, rpm, gear, throttle, brake, drs)
+ *  and location (x, y) endpoints. */
+export interface TelemetryData {
+  speed: number;     // km/h (0–360+)
+  rpm: number;       // engine RPM (0–15000)
+  n_gear: number;    // current gear (0–8, 0 = neutral)
+  throttle: number;  // throttle position (0–100)
+  brake: number;     // brake status (0 or 100 — OpenF1 only sends binary)
+  drs: number;       // DRS code (see DRS_* sets below)
+  x: number;         // track position X (circuit-specific units)
+  y: number;         // track position Y (circuit-specific units)
+}
+
+/** DRS integer codes from OpenF1 that mean the flap is physically open */
+export const DRS_OPEN_VALUES = new Set([10, 12, 14]);
+
+/** DRS code that means the driver is in a DRS zone but hasn't opened yet */
+export const DRS_ELIGIBLE_VALUES = new Set([8]);
+
+// ---------------------------------------------------------------------------
 // Live race tracking types
 // ---------------------------------------------------------------------------
 
@@ -159,6 +183,10 @@ export interface LiveRaceState {
   last_updated: string | null;
   connected_to_openf1: boolean;
   polling_active: boolean;
+  /** Per-driver telemetry (speed, rpm, gear, etc.) — only present with sponsor tier */
+  car_data: Record<number, TelemetryData>;
+  /** Whether the backend is polling telemetry endpoints (sponsor tier only) */
+  telemetry_available: boolean;
   /** Frontend-only fields added by the SSE hook */
   connected: boolean;
   lastUpdate: number;
