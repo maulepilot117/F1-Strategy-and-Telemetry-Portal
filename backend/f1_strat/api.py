@@ -21,10 +21,12 @@ from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
 import fastf1
+import pandas as pd
 
 from f1_strat.cache import setup_cache
 from f1_strat.degradation import DegradationService
 from f1_strat import live_race
+from f1_strat import replay
 from f1_strat.session_service import SessionService
 from f1_strat.strategy import StrategyEngine
 
@@ -78,6 +80,15 @@ def get_schedule(year: int, response: Response) -> list[dict]:
         # Skip testing events (round 0) — they aren't real race weekends
         if row["RoundNumber"] == 0:
             continue
+        # Session5DateUtc is the exact race start time — used by the frontend
+        # for live race auto-detection and countdown display.
+        race_dt = row.get("Session5DateUtc")
+        race_date_utc = (
+            race_dt.isoformat() + "Z"
+            if pd.notna(race_dt) and hasattr(race_dt, "isoformat")
+            else None
+        )
+
         events.append({
             "round_number": int(row["RoundNumber"]),
             "event_name": row["EventName"],
@@ -85,6 +96,7 @@ def get_schedule(year: int, response: Response) -> list[dict]:
             "location": row["Location"],
             "date": str(row["EventDate"].date()) if hasattr(row["EventDate"], "date") else str(row["EventDate"]),
             "event_format": row["EventFormat"],
+            "race_date_utc": race_date_utc,
         })
 
     return events
@@ -432,7 +444,8 @@ def post_strategy(year: int, grand_prix: str, body: StrategyRequest) -> dict:
 
 @app.on_event("shutdown")
 async def shutdown() -> None:
-    """Clean up on server shutdown: stop polling and close the HTTP client."""
+    """Clean up on server shutdown: stop polling/replay and close the HTTP client."""
+    await replay.stop_replay()
     await live_race.stop_polling()
     await live_race.close_client()
 
@@ -610,3 +623,60 @@ async def live_stream(request: Request, session_key: int) -> EventSourceResponse
             live_race._sse_client_count -= 1
 
     return EventSourceResponse(event_generator())
+
+
+# ---------------------------------------------------------------------------
+# Replay endpoints — play back historical races through the same SSE stream
+# ---------------------------------------------------------------------------
+
+class ReplaySpeedRequest(BaseModel):
+    """Request body for changing replay playback speed."""
+    speed: int = Field(ge=0, le=8, description="Playback speed: 0 (paused), 1, 2, 4, or 8.")
+
+
+@app.post("/api/replay/start/{session_key}")
+async def start_replay_endpoint(
+    session_key: int,
+    total_laps: int = Query(ge=1, le=100, description="Total laps in the race"),
+    year: int = Query(description="Season year"),
+    grand_prix: str = Query(description="Grand Prix name"),
+    speed: int = Query(default=4, ge=1, le=8, description="Initial playback speed"),
+) -> dict:
+    """Start replaying a historical race session.
+
+    Pre-fetches all data for the session from OpenF1, then plays it back
+    through the same SSE stream used for live tracking.  Connect to
+    `/api/live/stream/{session_key}` to receive replay data.
+
+    **Example:** `POST /api/replay/start/9539?total_laps=66&year=2024&grand_prix=Spain&speed=4`
+    """
+    await replay.start_replay(session_key, total_laps, year, grand_prix, speed)
+
+    return {
+        "status": "replaying",
+        "session_key": session_key,
+        "total_laps": total_laps,
+        "speed": speed,
+        "drivers": len(live_race._race_state.get("drivers", {})),
+    }
+
+
+@app.post("/api/replay/speed")
+async def set_replay_speed(body: ReplaySpeedRequest) -> dict:
+    """Change the replay playback speed.
+
+    Set speed to 0 to pause, or 1/2/4/8 to play at that multiplier.
+    Takes effect on the next replay cycle (~4 real seconds).
+    """
+    if not live_race._race_state.get("replay_mode"):
+        raise HTTPException(status_code=400, detail="No replay is active")
+
+    replay.set_replay_speed(body.speed)
+    return {"speed": body.speed}
+
+
+@app.post("/api/replay/stop")
+async def stop_replay_endpoint() -> dict:
+    """Stop the current replay and reset state."""
+    await replay.stop_replay()
+    return {"status": "stopped"}

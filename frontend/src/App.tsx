@@ -6,14 +6,18 @@ import DegradationChart from "./components/DegradationChart";
 import StrategyControls from "./components/StrategyControls";
 import StrategyList from "./components/StrategyList";
 import TelemetryDashboard from "./components/telemetry/TelemetryDashboard";
+import ReplayDashboard from "./components/telemetry/ReplayDashboard";
 import styles from "./App.module.css";
 
-/** The two modes the app can be in — "analysis" is the original view,
- *  "live" is the real-time race tracking dashboard. */
-type AppMode = "analysis" | "live";
+/** The three modes the app can be in:
+ *  - "analysis": original strategy analysis view
+ *  - "live": auto-detecting live race dashboard
+ *  - "replay": replay a past race through the telemetry dashboard
+ */
+type AppMode = "analysis" | "live" | "replay";
 
 export default function App() {
-  // -- App mode: "analysis" (default) or "live" --
+  // -- App mode --
   const [mode, setMode] = useState<AppMode>("analysis");
 
   // -- Race selection state --
@@ -124,12 +128,19 @@ export default function App() {
     }
   }
 
+  // Subtitle text per mode
+  const subtitles: Record<AppMode, string> = {
+    analysis: "Analyze tyre degradation and build pit stop strategies from real practice data",
+    live: "Track a live race session with real-time driver telemetry",
+    replay: "Replay a past race through the telemetry dashboard",
+  };
+
   return (
     <div className={styles.app}>
       {/* Page header with mode toggle */}
       <header className={styles.header}>
         <div className={styles.headerRow}>
-          {/* Mode toggle — pill-style buttons to switch between Analysis and Live */}
+          {/* Mode toggle — pill-style buttons to switch between modes */}
           <div className={styles.modeToggle}>
             <button
               className={`${styles.modeButton} ${mode === "analysis" ? styles.modeActive : ""}`}
@@ -143,19 +154,23 @@ export default function App() {
             >
               Live
             </button>
+            <button
+              className={`${styles.modeButton} ${mode === "replay" ? styles.modeActive : ""}`}
+              onClick={() => setMode("replay")}
+            >
+              Replay
+            </button>
           </div>
           <h1 className={styles.title}>F1 Race Strategy</h1>
         </div>
-        <p className={styles.subtitle}>
-          {mode === "analysis"
-            ? "Analyze tyre degradation and build pit stop strategies from real practice data"
-            : "Track a live race session with real-time driver telemetry"}
-        </p>
+        <p className={styles.subtitle}>{subtitles[mode]}</p>
       </header>
 
       {/* Conditionally render the active mode */}
       {mode === "live" ? (
         <TelemetryDashboard />
+      ) : mode === "replay" ? (
+        <ReplayDashboard />
       ) : (
         <>
           {/* Race selector: year + GP dropdowns + Analyze button */}

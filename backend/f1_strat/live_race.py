@@ -308,6 +308,9 @@ def _empty_state() -> dict:
         "grand_prix": None,         # stored for recalculation
         "car_data": {},             # keyed by driver_number → telemetry snapshot
         "telemetry_available": False,  # True when sponsor-tier telemetry is enabled
+        "replay_mode": False,          # True when in replay mode (vs live)
+        "replay_speed": 1,             # Playback speed multiplier (0=paused, 1/2/4/8)
+        "replay_elapsed_pct": 0,       # 0-100 progress through the replay
     }
 
 

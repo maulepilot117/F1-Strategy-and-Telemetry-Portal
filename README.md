@@ -17,8 +17,9 @@ Select any Grand Prix from 2023-2025, and the engine analyzes real practice and 
 
 ### Live Race Tracking & Telemetry
 
-Switch to Live mode during a race to follow a team's two drivers in real time:
+Switch to the Live tab during a race weekend. The dashboard auto-detects whether a race is happening:
 
+- **Auto-detection** — Fetches the current season's schedule and checks if a race is live (within 3 hours of start time). If yes, shows "Race In Progress" with a one-click connect button. If no race is live, shows a countdown timer to the next upcoming race with track name and local time
 - **Car telemetry** (sponsor tier) — Speed and RPM circular gauges, gear indicator with shift light strip, DRS status, throttle/brake bar gauges, and a speed-over-time chart per driver
 - **Track map** (sponsor tier) — SVG visualization of all 20 driver positions using real OpenF1 coordinates, with the selected team highlighted. Track shape reveals itself naturally from driver positions — no static circuit outlines needed
 - **Team focus** — Select your team and see both drivers side-by-side with position, gap, interval, tyre compound, tyre age, and pit stop history
@@ -26,6 +27,16 @@ Switch to Live mode during a race to follow a team's two drivers in real time:
 - **Safety car detection** — SC/VSC/red flag status tracked from race control messages with pulsing visual indicators
 - **Race control log** — Collapsible live feed of flags, safety cars, and race director messages
 - **Graceful degradation** — Without sponsor credentials, telemetry gauges and track map are hidden; the dashboard still shows all positional data, tyre info, and strategy recommendations
+
+### Race Replay
+
+Switch to the Replay tab to watch any past race played back through the same telemetry dashboard:
+
+- **Adjustable speed** — Play back at 1x, 2x, 4x, or 8x real-time speed, adjustable mid-replay
+- **Full telemetry** — Same driver panels, track map, and race control log as the live dashboard
+- **Pause/resume** — Pause playback to study a moment, then resume at any speed
+- **Progress bar** — Visual indicator of replay progress through the race
+- **Strategy recalculation** — Engine recalculates on pit events during replay, just like live
 
 ## How the Prediction Engine Works
 
@@ -156,6 +167,14 @@ cd frontend && deno task build
 | GET | `/api/live/drivers/{year}/{grand_prix}` | Teams and drivers for the team selector |
 | GET | `/api/live/stream/{session_key}` | SSE stream of full race state snapshots |
 
+### Race Replay
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/api/replay/start/{session_key}?total_laps=N&year=Y&grand_prix=GP&speed=4` | Start replaying a historical race |
+| POST | `/api/replay/speed` | Change playback speed (body: `{"speed": 4}`) |
+| POST | `/api/replay/stop` | Stop replay and reset state |
+
 ## Project Structure
 
 ```
@@ -172,6 +191,7 @@ f1_strat/
 │   │   ├── session_service.py    # Core data service (FastF1 wrapper)
 │   │   ├── strategy.py           # Race strategy engine
 │   │   ├── live_race.py          # OpenF1 polling + SSE state management
+│   │   ├── replay.py             # Historical race replay engine
 │   │   └── validation.py         # Backtesting engine vs actual race results
 │   └── tests/
 │       ├── test_degradation.py
@@ -184,7 +204,7 @@ f1_strat/
     ├── deno.json                 # Deno config (tasks, nodeModulesDir)
     ├── package.json              # Dependencies
     └── src/
-        ├── App.tsx               # Main app with Analysis/Live mode toggle
+        ├── App.tsx               # Main app with Analysis/Live/Replay mode toggle
         ├── api.ts                # Backend API client functions
         ├── types.ts              # TypeScript interfaces for all API shapes
         ├── hooks/
@@ -196,8 +216,10 @@ f1_strat/
             ├── StrategyList.tsx          # Ranked strategy results
             ├── StrategyTimeline.tsx      # Visual stint timeline
             ├── WeatherScenarioBuilder.tsx # Weather window editor
-            └── telemetry/               # Live telemetry dashboard (Tailwind)
-                ├── TelemetryDashboard.tsx  # Main view (selection + connected states)
+            └── telemetry/               # Live + replay telemetry dashboard (Tailwind)
+                ├── TelemetryDashboard.tsx  # Live view (auto-detect + countdown + connected)
+                ├── ReplayDashboard.tsx     # Replay view (GP selection + playback controls)
+                ├── ConnectedDashboard.tsx  # Shared connected state (driver panels, track map)
                 ├── DriverPanel.tsx         # Per-driver gauges + positional data
                 ├── CircularGauge.tsx       # SVG arc gauge (speed, RPM)
                 ├── BarGauge.tsx            # Skewed bar gauge (throttle, brake)

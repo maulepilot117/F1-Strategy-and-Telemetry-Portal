@@ -2,23 +2,21 @@
  * TelemetryDashboard — main live race view.
  *
  * Two states:
- *  1. Pre-connection: race selection UI (year, GP, team dropdowns + "Go Live")
- *  2. Connected: header bar, two DriverPanels side-by-side with LapDelta,
- *     TrackMap at the bottom, and collapsible race control log.
+ *  1. Pre-connection: auto-detects whether a race is live. If yes, shows
+ *     "Race in progress" and auto-connects. If no, shows a countdown to
+ *     the next upcoming race with track name and time remaining.
+ *  2. Connected: delegates to ConnectedDashboard (shared with ReplayDashboard).
  *
- * Replaces the old LiveDashboard end-to-end.  The connection flow is the same:
- *   fetchSchedule → fetchLiveDrivers → fetchLiveStatus → startLiveTracking → SSE
+ * The connection flow:
+ *   fetchSchedule → auto-detect → fetchLiveDrivers → fetchLiveStatus → startLiveTracking → SSE
  */
 
-import { useState, useEffect, useMemo } from "react";
-import { Activity } from "lucide-react";
+import { useState, useEffect, useMemo, useCallback } from "react";
+import { Activity, Clock } from "lucide-react";
 import type {
   ScheduleEvent,
-  LiveDriver,
   LiveTeam,
   LiveRaceState,
-  LiveStrategy,
-  RaceControlMessage,
 } from "../../types";
 import {
   fetchSchedule,
@@ -27,19 +25,32 @@ import {
   startLiveTracking,
 } from "../../api";
 import { useLiveRace } from "../../hooks/useLiveRace";
-import RaceStatusBadge from "./RaceStatusBadge";
-import TeamSelector from "./TeamSelector";
-import LapDelta from "./LapDelta";
-import DriverPanel from "./DriverPanel";
-import TrackMap from "./TrackMap";
+import ConnectedDashboard from "./ConnectedDashboard";
 
-const YEARS = [2025, 2024, 2023];
+/** How long after race_date_utc we consider a race to be "live" (3 hours) */
+const RACE_WINDOW_MS = 3 * 60 * 60 * 1000;
+
+/** Format a duration in ms as "Xd Xh Xm Xs" */
+function formatCountdown(ms: number): string {
+  if (ms <= 0) return "Starting now";
+  const totalSeconds = Math.floor(ms / 1000);
+  const days = Math.floor(totalSeconds / 86400);
+  const hours = Math.floor((totalSeconds % 86400) / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+
+  const parts: string[] = [];
+  if (days > 0) parts.push(`${days}d`);
+  if (hours > 0 || days > 0) parts.push(`${hours}h`);
+  parts.push(`${minutes}m`);
+  parts.push(`${seconds}s`);
+  return parts.join(" ");
+}
 
 export default function TelemetryDashboard() {
-  // -- Race selection --
-  const [year, setYear] = useState(2025);
+  // -- Schedule + auto-detection --
   const [schedule, setSchedule] = useState<ScheduleEvent[]>([]);
-  const [grandPrix, setGrandPrix] = useState("");
+  const [scheduleLoading, setScheduleLoading] = useState(true);
 
   // -- Team selection --
   const [teams, setTeams] = useState<LiveTeam[]>([]);
@@ -51,42 +62,80 @@ export default function TelemetryDashboard() {
   const [error, setError] = useState<string | null>(null);
   const [connecting, setConnecting] = useState(false);
 
-  // -- Race control log visibility --
-  const [logOpen, setLogOpen] = useState(false);
+  // -- Countdown timer --
+  const [now, setNow] = useState(Date.now());
 
   // SSE connection
   const raceState: LiveRaceState = useLiveRace(sessionKey);
 
-  // Fetch schedule when year changes
+  // Tick the clock every second for the countdown display
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, []);
+
+  // Fetch current year's schedule on mount
   useEffect(() => {
     let cancelled = false;
     async function load() {
+      setScheduleLoading(true);
       try {
-        const events = await fetchSchedule(year);
+        const currentYear = new Date().getFullYear();
+        const events = await fetchSchedule(currentYear);
         if (cancelled) return;
         setSchedule(events);
-        if (events.length > 0) setGrandPrix(events[0].event_name);
-        setSessionKey(null);
-        setTeams([]);
-        setSelectedTeam("");
-        setError(null);
       } catch (err) {
         if (!cancelled) {
           setError(err instanceof Error ? err.message : "Failed to load schedule");
         }
+      } finally {
+        if (!cancelled) setScheduleLoading(false);
       }
     }
     load();
     return () => { cancelled = true; };
-  }, [year]);
+  }, []);
 
-  // Fetch teams when GP changes
+  // Find the race that's currently live or the next upcoming race
+  const { liveRace, nextRace, countdownMs } = useMemo(() => {
+    const currentTime = now;
+    let liveRace: ScheduleEvent | null = null;
+    let nextRace: ScheduleEvent | null = null;
+    let countdownMs = 0;
+
+    for (const event of schedule) {
+      if (!event.race_date_utc) continue;
+      const raceStart = new Date(event.race_date_utc).getTime();
+      const raceEnd = raceStart + RACE_WINDOW_MS;
+
+      if (currentTime >= raceStart && currentTime <= raceEnd) {
+        // Race is happening right now
+        liveRace = event;
+        break;
+      }
+
+      if (raceStart > currentTime) {
+        // This is the next upcoming race
+        nextRace = event;
+        countdownMs = raceStart - currentTime;
+        break;
+      }
+    }
+
+    return { liveRace, nextRace, countdownMs };
+  }, [schedule, now]);
+
+  // Derive the relevant GP name for team loading
+  const relevantGP = liveRace?.event_name ?? nextRace?.event_name ?? "";
+  const relevantYear = new Date().getFullYear();
+
+  // Fetch teams when we know which GP to show
   useEffect(() => {
-    if (!grandPrix) return;
+    if (!relevantGP) return;
     let cancelled = false;
     async function load() {
       try {
-        const data = await fetchLiveDrivers(year, grandPrix);
+        const data = await fetchLiveDrivers(relevantYear, relevantGP);
         if (cancelled) return;
         setTeams(data.teams);
         if (data.teams.length > 0) setSelectedTeam(data.teams[0].team);
@@ -96,261 +145,166 @@ export default function TelemetryDashboard() {
     }
     load();
     return () => { cancelled = true; };
-  }, [year, grandPrix]);
+  }, [relevantGP, relevantYear]);
 
-  // "Go Live" handler
-  async function handleGo() {
-    if (!grandPrix) return;
+  // Connect to a live race — called automatically or via button
+  const handleConnect = useCallback(async (event: ScheduleEvent) => {
     setConnecting(true);
     setError(null);
     try {
-      const status = await fetchLiveStatus(year, grandPrix);
+      const status = await fetchLiveStatus(relevantYear, event.event_name);
       if (!status.session_key) {
         setError("No race session found. The session may not have started yet.");
         return;
       }
       const laps = status.total_laps ?? 66;
       setTotalLaps(laps);
-      await startLiveTracking(status.session_key, laps, year, grandPrix);
+      await startLiveTracking(status.session_key, laps, relevantYear, event.event_name);
       setSessionKey(status.session_key);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to connect");
     } finally {
       setConnecting(false);
     }
-  }
-
-  // Selected team's two drivers from the live state
-  const teamDrivers: LiveDriver[] = useMemo(() => {
-    if (!selectedTeam || !raceState.drivers) return [];
-    return Object.values(raceState.drivers)
-      .filter((d) => d.team === selectedTeam)
-      .sort((a, b) => a.position - b.position);
-  }, [selectedTeam, raceState.drivers]);
-
-  // Team colour for styling
-  const teamColor = useMemo(() => {
-    const team = teams.find((t) => t.team === selectedTeam);
-    return team?.team_color ?? "#888888";
-  }, [teams, selectedTeam]);
-
-  // Strategy recommendations per driver
-  const driverStrategies: Record<number, LiveStrategy[]> = useMemo(() => {
-    return raceState.strategies ?? {};
-  }, [raceState.strategies]);
-
-  // Race control log (most recent first)
-  const recentMessages: RaceControlMessage[] = useMemo(() => {
-    return [...raceState.race_control_log].reverse().slice(0, 20);
-  }, [raceState.race_control_log]);
-
-  // Selected team's driver numbers (for track map highlighting)
-  const selectedDriverNums = useMemo(() => {
-    return teamDrivers.map((d) => d.driver_number);
-  }, [teamDrivers]);
+  }, [relevantYear]);
 
   // -----------------------------------------------------------------------
-  // Pre-connection: race selection UI
+  // Connected: delegate to ConnectedDashboard
   // -----------------------------------------------------------------------
-  if (!sessionKey) {
+  if (sessionKey) {
     return (
-      <div className="min-h-[400px] bg-f1-black p-6 rounded-lg border border-f1-border">
-        <div className="max-w-md mx-auto space-y-6">
-          <div className="text-center space-y-2">
-            <Activity className="w-10 h-10 text-f1-red mx-auto" />
-            <h2 className="text-xl font-f1 font-bold text-f1-white">Live Telemetry</h2>
-            <p className="text-sm text-f1-muted font-f1">
-              Select a race and team to start tracking
-            </p>
-          </div>
-
-          {/* Year selector */}
-          <div className="space-y-1">
-            <label htmlFor="tele-year" className="text-xs text-f1-muted font-f1 uppercase tracking-wider">
-              Season
-            </label>
-            <select
-              id="tele-year"
-              value={year}
-              onChange={(e) => setYear(Number(e.target.value))}
-              className="w-full bg-f1-dark text-f1-white text-sm font-f1 border border-f1-border rounded px-3 py-2 focus:outline-none focus:border-f1-red"
-            >
-              {YEARS.map((y) => (
-                <option key={y} value={y}>{y}</option>
-              ))}
-            </select>
-          </div>
-
-          {/* GP selector */}
-          <div className="space-y-1">
-            <label htmlFor="tele-gp" className="text-xs text-f1-muted font-f1 uppercase tracking-wider">
-              Grand Prix
-            </label>
-            <select
-              id="tele-gp"
-              value={grandPrix}
-              onChange={(e) => setGrandPrix(e.target.value)}
-              disabled={schedule.length === 0}
-              className="w-full bg-f1-dark text-f1-white text-sm font-f1 border border-f1-border rounded px-3 py-2 focus:outline-none focus:border-f1-red"
-            >
-              {schedule.length === 0 && <option value="">Loading...</option>}
-              {schedule.map((ev) => (
-                <option key={ev.round_number} value={ev.event_name}>
-                  {ev.event_name} ({ev.country})
-                </option>
-              ))}
-            </select>
-          </div>
-
-          {/* Team selector */}
-          <div className="space-y-1">
-            <label htmlFor="tele-team" className="text-xs text-f1-muted font-f1 uppercase tracking-wider">
-              Team
-            </label>
-            <select
-              id="tele-team"
-              value={selectedTeam}
-              onChange={(e) => setSelectedTeam(e.target.value)}
-              disabled={teams.length === 0}
-              className="w-full bg-f1-dark text-f1-white text-sm font-f1 border border-f1-border rounded px-3 py-2 focus:outline-none focus:border-f1-red"
-            >
-              {teams.length === 0 && <option value="">Select GP first</option>}
-              {teams.map((t) => (
-                <option key={t.team} value={t.team}>{t.team}</option>
-              ))}
-            </select>
-          </div>
-
-          {/* Go Live button */}
-          <button
-            onClick={handleGo}
-            disabled={connecting || !grandPrix}
-            className="w-full bg-f1-red hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed text-white font-f1 font-semibold py-2.5 rounded transition-colors"
-          >
-            {connecting ? "Connecting..." : "Go Live"}
-          </button>
-
-          {error && (
-            <div className="bg-red-500/10 border border-red-500/30 text-red-400 text-sm font-f1 px-3 py-2 rounded">
-              {error}
-            </div>
-          )}
-        </div>
-      </div>
+      <ConnectedDashboard
+        raceState={raceState}
+        teams={teams}
+        selectedTeam={selectedTeam}
+        onTeamChange={setSelectedTeam}
+        totalLaps={totalLaps}
+      />
     );
   }
 
   // -----------------------------------------------------------------------
-  // Connected: full telemetry dashboard
+  // Pre-connection: auto-detection + countdown
   // -----------------------------------------------------------------------
   return (
-    <div className="bg-f1-black rounded-lg border border-f1-border overflow-hidden">
-      {/* Header bar */}
-      <div className="flex items-center justify-between px-4 py-2 bg-f1-card border-b border-f1-border">
-        <div className="flex items-center gap-3">
-          <Activity className="w-4 h-4 text-f1-red" />
-          <span className="text-sm font-f1 font-bold text-f1-white tracking-wider uppercase">
-            Live Telemetry
-          </span>
-          <RaceStatusBadge
-            isSafetyCar={raceState.is_safety_car}
-            lastMessage={raceState.last_race_control_message}
-          />
-        </div>
-        <div className="flex items-center gap-4">
-          <TeamSelector
-            teams={teams}
-            selectedTeam={selectedTeam}
-            onChange={setSelectedTeam}
-          />
-          {/* Connection indicator */}
-          <div className="flex items-center gap-1.5">
-            <div
-              className={`w-2 h-2 rounded-full ${
-                raceState.connected ? "bg-f1-green animate-pulse-fast" : "bg-red-500"
-              }`}
-            />
-            <span className="text-[10px] text-f1-muted font-f1 uppercase">
-              {raceState.connected ? "Live" : "Offline"}
-            </span>
+    <div className="min-h-[400px] bg-f1-black p-6 rounded-lg border border-f1-border">
+      <div className="max-w-md mx-auto space-y-6">
+        {scheduleLoading ? (
+          // Loading state
+          <div className="text-center py-12">
+            <Activity className="w-10 h-10 text-f1-red mx-auto animate-pulse" />
+            <p className="text-sm text-f1-muted font-f1 mt-4">
+              Loading race calendar...
+            </p>
           </div>
-        </div>
-      </div>
-
-      {/* Main content area */}
-      <div className="p-3">
-        {teamDrivers.length > 0 ? (
+        ) : liveRace ? (
+          // Race is happening now — prompt to connect
           <>
-            {/* Two driver panels with lap delta divider */}
-            <div className="flex gap-3 mb-3">
-              <DriverPanel
-                driver={teamDrivers[0]}
-                telemetry={raceState.car_data?.[teamDrivers[0].driver_number]}
-                telemetryAvailable={raceState.telemetry_available}
-                teamColor={teamColor}
-                strategies={driverStrategies[teamDrivers[0].driver_number] ?? []}
-              />
-              <LapDelta
-                driver1={teamDrivers[0]}
-                driver2={teamDrivers[1]}
-                currentLap={raceState.current_lap}
-                totalLaps={raceState.total_laps || totalLaps || 0}
-              />
-              {teamDrivers[1] && (
-                <DriverPanel
-                  driver={teamDrivers[1]}
-                  telemetry={raceState.car_data?.[teamDrivers[1].driver_number]}
-                  telemetryAvailable={raceState.telemetry_available}
-                  teamColor={teamColor}
-                  strategies={driverStrategies[teamDrivers[1].driver_number] ?? []}
-                />
-              )}
+            <div className="text-center space-y-2">
+              <Activity className="w-10 h-10 text-f1-green mx-auto animate-pulse" />
+              <h2 className="text-xl font-f1 font-bold text-f1-white">Race In Progress</h2>
+              <p className="text-lg font-f1 text-f1-red font-semibold">
+                {liveRace.event_name}
+              </p>
+              <p className="text-sm text-f1-muted font-f1">
+                {liveRace.location}, {liveRace.country}
+              </p>
             </div>
 
-            {/* Track map — shows all 20 drivers, selected team highlighted */}
-            {raceState.telemetry_available && Object.keys(raceState.car_data).length > 0 && (
-              <div className="h-52 bg-f1-card border border-f1-border rounded-lg p-2 mb-3">
-                <TrackMap
-                  drivers={raceState.drivers}
-                  carData={raceState.car_data}
-                  selectedDrivers={selectedDriverNums}
-                />
+            {/* Team selector */}
+            <div className="space-y-1">
+              <label htmlFor="live-team" className="text-xs text-f1-muted font-f1 uppercase tracking-wider">
+                Team
+              </label>
+              <select
+                id="live-team"
+                value={selectedTeam}
+                onChange={(e) => setSelectedTeam(e.target.value)}
+                disabled={teams.length === 0}
+                className="w-full bg-f1-dark text-f1-white text-sm font-f1 border border-f1-border rounded px-3 py-2 focus:outline-none focus:border-f1-red"
+              >
+                {teams.length === 0 && <option value="">Loading teams...</option>}
+                {teams.map((t) => (
+                  <option key={t.team} value={t.team}>{t.team}</option>
+                ))}
+              </select>
+            </div>
+
+            {/* Connect button */}
+            <button
+              onClick={() => handleConnect(liveRace)}
+              disabled={connecting}
+              className="w-full bg-f1-green hover:brightness-110 disabled:opacity-50 disabled:cursor-not-allowed text-black font-f1 font-semibold py-2.5 rounded transition-all"
+            >
+              {connecting ? "Connecting..." : "Connect to Live Race"}
+            </button>
+          </>
+        ) : nextRace ? (
+          // No live race — show countdown to next
+          <>
+            <div className="text-center space-y-3">
+              <Clock className="w-10 h-10 text-f1-muted mx-auto" />
+              <h2 className="text-xl font-f1 font-bold text-f1-white">Next Race</h2>
+              <p className="text-lg font-f1 text-f1-red font-semibold">
+                {nextRace.event_name}
+              </p>
+              <p className="text-sm text-f1-muted font-f1">
+                {nextRace.location}, {nextRace.country}
+              </p>
+
+              {/* Countdown display */}
+              <div className="bg-f1-card border border-f1-border rounded-lg py-4 px-6 mt-4">
+                <p className="text-3xl font-f1 font-bold text-f1-white tracking-wider">
+                  {formatCountdown(countdownMs)}
+                </p>
+                <p className="text-xs text-f1-muted font-f1 mt-1">
+                  {nextRace.race_date_utc
+                    ? new Date(nextRace.race_date_utc).toLocaleDateString(undefined, {
+                        weekday: "long",
+                        month: "long",
+                        day: "numeric",
+                        hour: "2-digit",
+                        minute: "2-digit",
+                        timeZoneName: "short",
+                      })
+                    : nextRace.date}
+                </p>
               </div>
-            )}
+            </div>
+
+            {/* Pre-select team while waiting */}
+            <div className="space-y-1">
+              <label htmlFor="next-team" className="text-xs text-f1-muted font-f1 uppercase tracking-wider">
+                Pre-select Team
+              </label>
+              <select
+                id="next-team"
+                value={selectedTeam}
+                onChange={(e) => setSelectedTeam(e.target.value)}
+                disabled={teams.length === 0}
+                className="w-full bg-f1-dark text-f1-white text-sm font-f1 border border-f1-border rounded px-3 py-2 focus:outline-none focus:border-f1-red"
+              >
+                {teams.length === 0 && <option value="">Loading teams...</option>}
+                {teams.map((t) => (
+                  <option key={t.team} value={t.team}>{t.team}</option>
+                ))}
+              </select>
+            </div>
           </>
         ) : (
-          <div className="py-12 text-center text-f1-muted font-f1 text-sm">
-            Waiting for driver data...
+          // Season over or no upcoming races
+          <div className="text-center space-y-2 py-8">
+            <Activity className="w-10 h-10 text-f1-muted mx-auto" />
+            <h2 className="text-xl font-f1 font-bold text-f1-white">No Upcoming Races</h2>
+            <p className="text-sm text-f1-muted font-f1">
+              The current season has ended. Use the Replay tab to watch past races.
+            </p>
           </div>
         )}
 
-        {/* Collapsible race control log */}
-        {recentMessages.length > 0 && (
-          <div className="border-t border-f1-border pt-2">
-            <button
-              onClick={() => setLogOpen(!logOpen)}
-              className="flex items-center gap-2 text-xs text-f1-muted font-f1 uppercase tracking-wider hover:text-f1-white transition-colors w-full"
-            >
-              <span className={`transition-transform ${logOpen ? "rotate-90" : ""}`}>
-                ▶
-              </span>
-              Race Control ({recentMessages.length})
-            </button>
-            {logOpen && (
-              <ul className="mt-2 space-y-1 max-h-40 overflow-y-auto">
-                {recentMessages.map((msg, i) => (
-                  <li
-                    key={i}
-                    className="flex items-start gap-2 text-xs font-f1"
-                  >
-                    <span className="text-f1-muted w-12 flex-shrink-0">
-                      {msg.lap !== null ? `L${msg.lap}` : "—"}
-                    </span>
-                    <span className="text-f1-white">{msg.message}</span>
-                  </li>
-                ))}
-              </ul>
-            )}
+        {error && (
+          <div className="bg-red-500/10 border border-red-500/30 text-red-400 text-sm font-f1 px-3 py-2 rounded">
+            {error}
           </div>
         )}
       </div>

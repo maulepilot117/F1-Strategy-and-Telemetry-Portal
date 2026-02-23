@@ -134,3 +134,53 @@ export async function startLiveTracking(
   if (!res.ok) throw new Error(`Start tracking failed: ${res.statusText}`);
   return res.json();
 }
+
+// ---------------------------------------------------------------------------
+// Replay endpoints
+// ---------------------------------------------------------------------------
+
+/** Start replaying a historical race session.
+ *
+ * Pre-fetches all data and plays it back through the same SSE stream.
+ * Connect to `/api/live/stream/{sessionKey}` to receive replay data.
+ */
+export async function startReplay(
+  sessionKey: number,
+  totalLaps: number,
+  year: number,
+  grandPrix: string,
+  speed: number = 4,
+): Promise<{ status: string; session_key: number; speed: number }> {
+  const params = new URLSearchParams({
+    total_laps: totalLaps.toString(),
+    year: year.toString(),
+    grand_prix: grandPrix,
+    speed: speed.toString(),
+  });
+  const res = await fetch(
+    `${BASE}/api/replay/start/${sessionKey}?${params}`,
+    { method: "POST" },
+  );
+  if (!res.ok) throw new Error(`Start replay failed: ${res.statusText}`);
+  return res.json();
+}
+
+/** Change replay playback speed (0=paused, 1/2/4/8). */
+export async function setReplaySpeed(
+  speed: number,
+): Promise<{ speed: number }> {
+  const res = await fetch(`${BASE}/api/replay/speed`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ speed }),
+  });
+  if (!res.ok) throw new Error(`Set replay speed failed: ${res.statusText}`);
+  return res.json();
+}
+
+/** Stop the current replay and reset state. */
+export async function stopReplay(): Promise<{ status: string }> {
+  const res = await fetch(`${BASE}/api/replay/stop`, { method: "POST" });
+  if (!res.ok) throw new Error(`Stop replay failed: ${res.statusText}`);
+  return res.json();
+}

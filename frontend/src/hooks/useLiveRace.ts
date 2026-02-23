@@ -38,6 +38,9 @@ const INITIAL_STATE: LiveRaceState = {
   polling_active: false,
   car_data: {},
   telemetry_available: false,
+  replay_mode: false,
+  replay_speed: 1,
+  replay_elapsed_pct: 0,
   connected: false,
   lastUpdate: 0,
 };

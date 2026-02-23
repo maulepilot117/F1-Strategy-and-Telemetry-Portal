@@ -9,6 +9,8 @@ export interface ScheduleEvent {
   location: string;
   date: string;
   event_format: string;
+  /** Exact race start time (ISO string) — used for auto-detection and countdown */
+  race_date_utc: string | null;
 }
 
 /** A single point on a degradation curve */
@@ -187,6 +189,12 @@ export interface LiveRaceState {
   car_data: Record<number, TelemetryData>;
   /** Whether the backend is polling telemetry endpoints (sponsor tier only) */
   telemetry_available: boolean;
+  /** True when viewing a replay (vs live) */
+  replay_mode: boolean;
+  /** Playback speed multiplier (0=paused, 1/2/4/8) */
+  replay_speed: number;
+  /** 0-100 progress through the replay */
+  replay_elapsed_pct: number;
   /** Frontend-only fields added by the SSE hook */
   connected: boolean;
   lastUpdate: number;
