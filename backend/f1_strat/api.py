@@ -14,6 +14,14 @@ Then visit http://localhost:8000/docs to see the interactive API docs.
 
 import asyncio
 import json
+import logging
+
+# Configure the root logger so all application loggers (live_race, replay, etc.)
+# produce output.  Without this, only uvicorn's own logs appear.
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(name)-20s %(levelname)-5s %(message)s",
+)
 
 from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
@@ -651,6 +659,17 @@ async def start_replay_endpoint(
     **Example:** `POST /api/replay/start/9539?total_laps=66&year=2024&grand_prix=Spain&speed=4`
     """
     await replay.start_replay(session_key, total_laps, year, grand_prix, speed)
+
+    # Check if the replay actually started — it aborts if OpenF1 data
+    # couldn't be fetched (e.g., rate limited).
+    if not live_race._race_state.get("replay_mode"):
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Could not fetch race data from OpenF1 (likely rate-limited). "
+                "Wait a few minutes and try again."
+            ),
+        )
 
     return {
         "status": "replaying",

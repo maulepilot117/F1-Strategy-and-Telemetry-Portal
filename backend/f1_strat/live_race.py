@@ -510,14 +510,21 @@ def _update_from_car_data(records: list[dict]) -> None:
         brake (0 or 100), drs (int code), date
     Records arrive chronologically, so iterating forward and overwriting
     keeps only the most recent sample per driver.
+
+    OpenF1 sometimes sends zero-value records (speed=0, rpm=0, throttle=0)
+    during momentary telemetry dropouts.  We prefer the latest record that
+    has rpm > 0 (engine running / transmitting real data) over a later
+    all-zero record.  This prevents the UI from flickering to 0 mid-race.
     """
-    # Build latest-per-driver map
-    latest: dict[int, dict] = {}
+    # Build latest-per-driver map, preferring records with real data.
+    # "latest_valid" has rpm > 0, "latest_any" is the absolute last record.
+    latest_valid: dict[int, dict] = {}
+    latest_any: dict[int, dict] = {}
     for rec in records:
         driver_num = rec.get("driver_number")
         if driver_num is None:
             continue
-        latest[driver_num] = {
+        data = {
             "speed": rec.get("speed", 0),
             "rpm": rec.get("rpm", 0),
             "n_gear": rec.get("n_gear", 0),
@@ -525,6 +532,17 @@ def _update_from_car_data(records: list[dict]) -> None:
             "brake": rec.get("brake", 0),
             "drs": rec.get("drs", 0),
         }
+        latest_any[driver_num] = data
+        if data["rpm"] > 0:
+            latest_valid[driver_num] = data
+
+    # Use the valid record if available, otherwise fall back to the raw latest.
+    # This prevents telemetry dropouts (all-zero records) from overwriting
+    # real data mid-race, while still allowing genuine zero values through
+    # when no valid data exists (e.g., car retired, engine off).
+    latest: dict[int, dict] = {}
+    for driver_num in latest_any:
+        latest[driver_num] = latest_valid.get(driver_num, latest_any[driver_num])
 
     # Merge into car_data — preserve any existing x/y from location
     for driver_num, data in latest.items():
@@ -928,26 +946,54 @@ async def stop_polling() -> None:
 async def resolve_session_key(
     year: int, country_name: str, session_name: str = "Race"
 ) -> int | None:
-    """Resolve a year + country to an OpenF1 session_key.
+    """Resolve a year + country/event name to an OpenF1 session_key.
 
-    Queries the OpenF1 /sessions endpoint to find the matching session.
+    OpenF1 uses country names (e.g., "Spain") while FastF1 uses event names
+    (e.g., "Spanish Grand Prix").  This function tries the value directly
+    first, then falls back to looking up the country from FastF1's schedule
+    if the direct match fails.
 
     Args:
         year: Season year (e.g., 2025).
-        country_name: Country name matching OpenF1's format (e.g., "Spain").
+        country_name: Country name or FastF1 event name.
         session_name: Session type, default "Race".
 
     Returns:
         Integer session_key, or None if no matching session found.
     """
+    # Try the value directly (works when the caller passes a country name)
     data = await fetch_openf1("/sessions", {
         "year": year,
         "country_name": country_name,
         "session_name": session_name,
     })
 
-    if not data:
-        return None
+    if data:
+        return data[0].get("session_key")
 
-    # OpenF1 returns a list — take the first (and usually only) match
-    return data[0].get("session_key")
+    # Direct match failed — the caller likely passed a FastF1 event name
+    # like "Spanish Grand Prix".  Look up the country from FastF1's schedule.
+    try:
+        import fastf1
+        from f1_strat.cache import setup_cache
+        setup_cache()
+        schedule = fastf1.get_event_schedule(year)
+        for _, row in schedule.iterrows():
+            if row["EventName"] == country_name:
+                country = row["Country"]
+                logger.info(
+                    "Mapped event name '%s' → country '%s' for OpenF1 lookup",
+                    country_name, country,
+                )
+                data = await fetch_openf1("/sessions", {
+                    "year": year,
+                    "country_name": country,
+                    "session_name": session_name,
+                })
+                if data:
+                    return data[0].get("session_key")
+                break
+    except Exception as e:
+        logger.warning("FastF1 schedule lookup failed: %s", e)
+
+    return None

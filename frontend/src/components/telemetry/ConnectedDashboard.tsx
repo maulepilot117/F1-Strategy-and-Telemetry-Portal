@@ -5,11 +5,8 @@
  * can render the same driver panels, track map, and race control log
  * without duplicating layout code.
  *
- * The parent provides:
- *  - raceState: the SSE-driven LiveRaceState
- *  - teams/selectedTeam: team data and selection
- *  - totalLaps: fallback for raceState.total_laps
- *  - headerExtra: optional React node for additional header controls (e.g., replay speed)
+ * Header styled to match F1 broadcast aesthetic:
+ *  F1 logo | LIVE TELEMETRY | Track status badge | [extra] | Team selector | Live dot
  */
 
 import { useState, useMemo } from "react";
@@ -81,18 +78,26 @@ export default function ConnectedDashboard({
 
   return (
     <div className="bg-f1-black rounded-lg border border-f1-border overflow-hidden">
-      {/* Header bar */}
-      <div className="flex items-center justify-between px-4 py-2 bg-f1-card border-b border-f1-border">
+      {/* ── Header bar — broadcast style ── */}
+      <div className="flex items-center justify-between px-4 py-2.5 bg-f1-card border-b border-f1-border">
+        {/* Left: logo + title + status */}
         <div className="flex items-center gap-3">
-          <Activity className="w-4 h-4 text-f1-red" />
-          <span className="text-sm font-f1 font-bold text-f1-white tracking-wider uppercase">
-            {headerLabel}
-          </span>
+          <Activity className="w-5 h-5 text-f1-red" />
+          <div className="flex flex-col">
+            <span className="text-sm font-f1 font-bold text-f1-white tracking-wider uppercase leading-tight">
+              {headerLabel}
+            </span>
+            <span className="text-[9px] font-f1 text-f1-muted tracking-widest uppercase">
+              Official Data Stream
+            </span>
+          </div>
           <RaceStatusBadge
             isSafetyCar={raceState.is_safety_car}
             lastMessage={raceState.last_race_control_message}
           />
         </div>
+
+        {/* Right: extra controls + team selector + connection indicator */}
         <div className="flex items-center gap-4">
           {headerExtra}
           <TeamSelector
@@ -103,11 +108,11 @@ export default function ConnectedDashboard({
           {/* Connection indicator */}
           <div className="flex items-center gap-1.5">
             <div
-              className={`w-2 h-2 rounded-full ${
+              className={`w-2.5 h-2.5 rounded-full ${
                 raceState.connected ? "bg-f1-green animate-pulse-fast" : "bg-red-500"
               }`}
             />
-            <span className="text-[10px] text-f1-muted font-f1 uppercase">
+            <span className="text-[10px] text-f1-muted font-f1 uppercase font-semibold tracking-wider">
               {raceState.connected
                 ? raceState.replay_mode ? "Replay" : "Live"
                 : "Offline"}
@@ -116,12 +121,12 @@ export default function ConnectedDashboard({
         </div>
       </div>
 
-      {/* Main content area */}
+      {/* ── Main content area ── */}
       <div className="p-3">
         {teamDrivers.length > 0 ? (
           <>
-            {/* Two driver panels with lap delta divider */}
-            <div className="flex gap-3 mb-3">
+            {/* Two driver panels with gap/lap divider between them */}
+            <div className="flex gap-2 mb-3">
               <DriverPanel
                 driver={teamDrivers[0]}
                 telemetry={raceState.car_data?.[teamDrivers[0].driver_number]}
@@ -148,12 +153,19 @@ export default function ConnectedDashboard({
 
             {/* Track map — shows all 20 drivers, selected team highlighted */}
             {raceState.telemetry_available && Object.keys(raceState.car_data).length > 0 && (
-              <div className="h-52 bg-f1-card border border-f1-border rounded-lg p-2 mb-3">
-                <TrackMap
-                  drivers={raceState.drivers}
-                  carData={raceState.car_data}
-                  selectedDrivers={selectedDriverNums}
-                />
+              <div className="bg-f1-card border border-f1-border rounded-lg overflow-hidden mb-3">
+                <div className="flex items-center justify-between px-3 py-1.5 border-b border-f1-border">
+                  <span className="text-[10px] uppercase tracking-wider text-f1-muted font-f1 font-semibold">
+                    Track Position
+                  </span>
+                </div>
+                <div className="h-52 p-2">
+                  <TrackMap
+                    drivers={raceState.drivers}
+                    carData={raceState.car_data}
+                    selectedDrivers={selectedDriverNums}
+                  />
+                </div>
               </div>
             )}
           </>
@@ -163,7 +175,7 @@ export default function ConnectedDashboard({
           </div>
         )}
 
-        {/* Collapsible race control log */}
+        {/* ── Collapsible race control log ── */}
         {recentMessages.length > 0 && (
           <div className="border-t border-f1-border pt-2">
             <button
@@ -171,7 +183,7 @@ export default function ConnectedDashboard({
               className="flex items-center gap-2 text-xs text-f1-muted font-f1 uppercase tracking-wider hover:text-f1-white transition-colors w-full"
             >
               <span className={`transition-transform ${logOpen ? "rotate-90" : ""}`}>
-                ▶
+                &#9654;
               </span>
               Race Control ({recentMessages.length})
             </button>

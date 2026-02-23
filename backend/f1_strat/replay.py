@@ -115,33 +115,57 @@ async def start_replay(
         session_key, total_laps, speed,
     )
 
-    # Pre-fetch all low-frequency data in parallel — these are small enough
-    # to load in one shot (~28K records total across all endpoints).
+    # Clear any rate-limit backoff from previous requests so the pre-fetch
+    # doesn't immediately skip all calls due to leftover backoff state.
+    live_race._backoff_seconds = 0.0
+
+    # Pre-fetch all low-frequency data sequentially with small delays.
+    # Parallel fetching (asyncio.gather) hammers the OpenF1 free tier with
+    # 6 simultaneous requests, triggering 429 rate limits.  Sequential
+    # fetching with 1-second gaps stays within limits reliably.
     params: dict[str, Any] = {"session_key": session_key}
+    _FETCH_DELAY = 1.0  # seconds between requests to avoid rate limits
 
-    rc_task = live_race.fetch_openf1("/race_control", params)
-    pit_task = live_race.fetch_openf1("/pit", params)
-    pos_task = live_race.fetch_openf1("/position", params)
-    interval_task = live_race.fetch_openf1("/intervals", params)
-    stints_task = live_race.fetch_openf1("/stints", params)
-    drivers_task = live_race.fetch_openf1("/drivers", params)
+    endpoints = [
+        ("drivers", "/drivers"),
+        ("race_control", "/race_control"),
+        ("pit", "/pit"),
+        ("position", "/position"),
+        ("intervals", "/intervals"),
+        ("stints", "/stints"),
+    ]
 
-    results = await asyncio.gather(
-        rc_task, pit_task, pos_task, interval_task, stints_task, drivers_task,
-        return_exceptions=True,
-    )
+    fetched: dict[str, list[dict]] = {}
+    for name, path in endpoints:
+        try:
+            data = await live_race.fetch_openf1(path, params)
+            fetched[name] = data
+            logger.info("Fetched %d %s records", len(data), name)
+        except Exception as e:
+            logger.warning("Failed to fetch %s for replay: %s", name, e)
+            fetched[name] = []
+        # Small delay between requests to stay under rate limits
+        await asyncio.sleep(_FETCH_DELAY)
 
-    # Unpack results — log errors but continue with whatever data we got
-    for i, name in enumerate(["race_control", "pit", "position", "intervals", "stints", "drivers"]):
-        if isinstance(results[i], Exception):
-            logger.warning("Failed to fetch %s for replay: %s", name, results[i])
+    _rc_timeline = fetched["race_control"]
+    _pit_timeline = fetched["pit"]
+    _pos_timeline = fetched["position"]
+    _interval_timeline = fetched["intervals"]
+    _stints_data = fetched["stints"]
+    drivers_data = fetched["drivers"]
 
-    _rc_timeline = results[0] if not isinstance(results[0], Exception) else []
-    _pit_timeline = results[1] if not isinstance(results[1], Exception) else []
-    _pos_timeline = results[2] if not isinstance(results[2], Exception) else []
-    _interval_timeline = results[3] if not isinstance(results[3], Exception) else []
-    _stints_data = results[4] if not isinstance(results[4], Exception) else []
-    drivers_data = results[5] if not isinstance(results[5], Exception) else []
+    # Abort if the driver fetch failed — replay can't work without drivers.
+    # This typically means we hit an OpenF1 rate limit (429).
+    if not drivers_data:
+        logger.error(
+            "No driver data fetched for session %d — aborting replay "
+            "(likely rate-limited by OpenF1, try again in a few minutes)",
+            session_key,
+        )
+        live_race._race_state["polling_active"] = False
+        live_race._race_state["connected_to_openf1"] = False
+        live_race._race_state["replay_mode"] = False
+        return
 
     # Populate drivers in race state
     for d in drivers_data:
@@ -163,12 +187,15 @@ async def start_replay(
                 "interval": 0.0,
             }
 
-    # Tell frontend whether telemetry is available (replay supports it
-    # if sponsor credentials are set, since we'll fetch car_data/location)
-    live_race._race_state["telemetry_available"] = live_race._TELEMETRY_ENABLED
+    # Historical car_data/location is available on the free OpenF1 tier —
+    # the sponsor-only restriction only applies to real-time data during
+    # active sessions.  So replay always enables telemetry.
+    live_race._race_state["telemetry_available"] = True
 
-    # Determine session time boundaries from all timestamped data.
-    # This defines the replay window: start to end.
+    # Determine session time boundaries.
+    # The raw data spans the entire broadcast window (pre-race through finish),
+    # but we want the replay to start from "SESSION STARTED" (lights out) so
+    # users don't sit through 50+ minutes of pre-race grid footage.
     all_timestamps: list[datetime] = []
     for timeline in [_rc_timeline, _pit_timeline, _pos_timeline, _interval_timeline]:
         all_timestamps.extend(_get_timestamps(timeline))
@@ -178,7 +205,26 @@ async def start_replay(
         live_race._race_state["polling_active"] = False
         return
 
-    _session_start = min(all_timestamps).isoformat()
+    # Look for "SESSION STARTED" in race_control to find actual race start.
+    # If not found, fall back to the earliest data timestamp.
+    race_start_dt: datetime | None = None
+    for rc in _rc_timeline:
+        msg = (rc.get("message") or "").upper()
+        if "SESSION STARTED" in msg:
+            race_start_dt = _parse_dt(rc.get("date"))
+            break
+
+    data_start = min(all_timestamps)
+    if race_start_dt and race_start_dt > data_start:
+        _session_start = race_start_dt.isoformat()
+        logger.info(
+            "Using SESSION STARTED as replay start: %s (skipping %d min of pre-race)",
+            _session_start,
+            int((race_start_dt - data_start).total_seconds() / 60),
+        )
+    else:
+        _session_start = data_start.isoformat()
+
     _session_end = max(all_timestamps).isoformat()
 
     logger.info(
@@ -193,6 +239,33 @@ async def start_replay(
     _pos_idx = 0
     _interval_idx = 0
     _stop_requested = False
+
+    # If we skipped the pre-race period, fast-forward all timelines up to
+    # the replay start and apply their records immediately.  This ensures
+    # driver positions, stints, and race control state are correct from
+    # the first frame the user sees.
+    start_dt = _parse_dt(_session_start)
+    if start_dt and start_dt > data_start:
+        rc_pre, _rc_idx = _collect_records_up_to(_rc_timeline, _rc_idx, start_dt)
+        pit_pre, _pit_idx = _collect_records_up_to(_pit_timeline, _pit_idx, start_dt)
+        pos_pre, _pos_idx = _collect_records_up_to(_pos_timeline, _pos_idx, start_dt)
+        iv_pre, _interval_idx = _collect_records_up_to(_interval_timeline, _interval_idx, start_dt)
+
+        if rc_pre:
+            live_race._update_from_race_control(rc_pre)
+        if pit_pre:
+            live_race._update_from_pits(pit_pre)
+        if pos_pre:
+            live_race._update_from_positions(pos_pre)
+        if iv_pre:
+            live_race._update_from_intervals(iv_pre)
+
+        _apply_stints_for_lap(1)
+
+        logger.info(
+            "Pre-applied %d rc, %d pit, %d pos, %d interval records before race start",
+            len(rc_pre), len(pit_pre), len(pos_pre), len(iv_pre),
+        )
 
     # Launch the replay loop
     _replay_task = asyncio.create_task(_replay_loop(session_key, total_laps))
@@ -234,15 +307,19 @@ def _apply_stints_for_lap(current_lap: int) -> None:
     if not _stints_data:
         return
 
-    # Find the most recent stint per driver for the current lap
+    # Find the most recent stint per driver for the current lap.
+    # OpenF1 can return lap_start as None (explicitly null in JSON) for
+    # stints that haven't started yet, so we must guard against that.
     latest_per_driver: dict[int, dict] = {}
     for stint in _stints_data:
         driver_num = stint.get("driver_number")
-        lap_start = stint.get("lap_start", 0)
-        if driver_num is not None and lap_start <= current_lap:
+        lap_start = stint.get("lap_start")
+        if driver_num is None or lap_start is None:
+            continue
+        if lap_start <= current_lap:
             # Keep the one with the highest lap_start (most recent)
             existing = latest_per_driver.get(driver_num)
-            if existing is None or lap_start > existing.get("lap_start", 0):
+            if existing is None or lap_start > (existing.get("lap_start") or 0):
                 latest_per_driver[driver_num] = stint
 
     if latest_per_driver:
@@ -277,8 +354,10 @@ async def _replay_loop(session_key: int, total_laps: int) -> None:
     total_duration = (end_dt - start_dt).total_seconds()
     cycle_interval = 4.0  # Real seconds between replay ticks
 
-    # Track last car_data/location fetch time for windowed requests
-    last_telemetry_dt: str | None = None
+    # Track last car_data/location fetch time for windowed requests.
+    # Initialize to session start so the first request has both bounds —
+    # an unbounded request (no date>) returns too much data and may 500.
+    last_telemetry_dt: str = _session_start
 
     logger.info("Replay loop started: %s → %s", _session_start, _session_end)
 
@@ -357,29 +436,46 @@ async def _replay_loop(session_key: int, total_laps: int) -> None:
                 _apply_stints_for_lap(estimated_lap)
 
         # Fetch telemetry (car_data + location) in time-windowed chunks.
-        # These are too large to pre-fetch, so we stream them during playback.
-        if live_race._TELEMETRY_ENABLED:
-            virtual_iso = virtual_clock.isoformat()
-            try:
-                telemetry_params: dict[str, Any] = {"session_key": session_key}
-                if last_telemetry_dt:
-                    telemetry_params["date>"] = last_telemetry_dt
-                telemetry_params["date<="] = virtual_iso
+        # Historical data is available on the free OpenF1 tier (sponsor tier
+        # is only needed for real-time data during active sessions).
+        #
+        # Use "date>" and "date<" (strict operators, matching the live polling
+        # pattern) — the "date<=" operator causes 500 errors on some endpoints.
+        # Requests are sequential with a delay to avoid rate-limit issues on
+        # the free tier (parallel requests can trigger per-second limits).
+        virtual_iso = virtual_clock.isoformat()
+        try:
+            telemetry_params: dict[str, Any] = {
+                "session_key": session_key,
+                "date>": last_telemetry_dt,
+                "date<": virtual_iso,
+            }
 
-                car_data, location = await asyncio.gather(
-                    live_race.fetch_openf1("/car_data", telemetry_params),
-                    live_race.fetch_openf1("/location", telemetry_params),
-                    return_exceptions=True,
+            car_data = await live_race.fetch_openf1("/car_data", telemetry_params)
+            if car_data:
+                live_race._update_from_car_data(car_data)
+                logger.info(
+                    "Replay tick: lap %d, %.1f%%, car_data=%d records",
+                    live_race._race_state["current_lap"],
+                    live_race._race_state["replay_elapsed_pct"],
+                    len(car_data),
+                )
+            else:
+                logger.info(
+                    "Replay tick: lap %d, %.1f%%, car_data=0 (empty response)",
+                    live_race._race_state["current_lap"],
+                    live_race._race_state["replay_elapsed_pct"],
                 )
 
-                if not isinstance(car_data, Exception) and car_data:
-                    live_race._update_from_car_data(car_data)
-                if not isinstance(location, Exception) and location:
-                    live_race._update_from_location(location)
+            await asyncio.sleep(0.5)  # Small gap between requests
 
-                last_telemetry_dt = virtual_iso
-            except Exception as e:
-                logger.warning("Telemetry fetch failed during replay: %s", e)
+            location = await live_race.fetch_openf1("/location", telemetry_params)
+            if location:
+                live_race._update_from_location(location)
+
+            last_telemetry_dt = virtual_iso
+        except Exception as e:
+            logger.warning("Telemetry fetch failed during replay: %s", e)
 
         # Trigger strategy recalculation on pit events
         new_pits = len(live_race._race_state["pit_log"]) > pit_count_before
