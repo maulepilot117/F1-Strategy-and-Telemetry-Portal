@@ -286,6 +286,84 @@ async def fetch_openf1(endpoint: str, params: dict | None = None) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
+# Track outline — one-time fetch of circuit shape from location data
+# ---------------------------------------------------------------------------
+
+async def fetch_track_outline(
+    session_key: int,
+    race_start_iso: str,
+) -> list[dict] | None:
+    """Fetch one driver's location data for a clean lap to trace the circuit outline.
+
+    OpenF1's /location endpoint returns (x, y) positions at ~3.7 Hz per driver.
+    One full racing lap (~90s) gives ~330 ordered points that trace the circuit.
+    We fetch data from ~240-360s after race start (lap 3-4) to avoid the messy
+    formation lap and first-lap chaos, then downsample to ~120 points.
+
+    Args:
+        session_key: OpenF1 session identifier.
+        race_start_iso: ISO timestamp of the race start (SESSION STARTED message).
+
+    Returns:
+        List of {"x": float, "y": float} dicts (~120 points), or None if
+        insufficient data was returned (<50 points).
+    """
+    # Pick the first driver from the current state to use as our outline source.
+    # Any driver works — they all trace the same circuit.
+    driver_nums = list(_race_state.get("drivers", {}).keys())
+    if not driver_nums:
+        logger.warning("No drivers in state — cannot fetch track outline")
+        return None
+
+    driver_number = driver_nums[0]
+
+    # Compute time window for lap 3-4: race start + 240s to + 360s.
+    # This avoids the messy lap-1 data (formation lap, standing start,
+    # turn-1 incidents) and captures one clean racing lap.
+    try:
+        start_dt = datetime.fromisoformat(race_start_iso.replace("Z", "+00:00"))
+        window_start = datetime.fromtimestamp(
+            start_dt.timestamp() + 240, tz=timezone.utc
+        )
+        window_end = datetime.fromtimestamp(
+            start_dt.timestamp() + 360, tz=timezone.utc
+        )
+    except (ValueError, TypeError) as e:
+        logger.warning("Cannot parse race_start_iso for track outline: %s", e)
+        return None
+
+    # Fetch location data for this driver in the time window
+    data = await fetch_openf1("/location", {
+        "session_key": session_key,
+        "driver_number": driver_number,
+        "date>": window_start.isoformat(),
+        "date<": window_end.isoformat(),
+    })
+
+    if not data or len(data) < 50:
+        logger.warning(
+            "Track outline: only %d points for driver %d — skipping",
+            len(data) if data else 0, driver_number,
+        )
+        return None
+
+    # Extract ordered (x, y) points and downsample to ~120 points.
+    # Every Nth point keeps the shape while reducing SSE payload (~2.4KB).
+    raw_points = [{"x": d["x"], "y": d["y"]} for d in data if "x" in d and "y" in d]
+    if len(raw_points) < 50:
+        return None
+
+    step = max(1, len(raw_points) // 120)
+    outline = raw_points[::step]
+
+    logger.info(
+        "Track outline: %d raw points → %d simplified (driver %d)",
+        len(raw_points), len(outline), driver_number,
+    )
+    return outline
+
+
+# ---------------------------------------------------------------------------
 # Race state — the single source of truth, read by SSE endpoint
 # ---------------------------------------------------------------------------
 
@@ -311,6 +389,9 @@ def _empty_state() -> dict:
         "replay_mode": False,          # True when in replay mode (vs live)
         "replay_speed": 1,             # Playback speed multiplier (0=paused, 1/2/4/8)
         "replay_elapsed_pct": 0,       # 0-100 progress through the replay
+        "track_outline": None,         # Circuit outline points [{x, y}, ...] from OpenF1 location data
+        "location_buffer": [],         # Chronological location records for frontend animation
+        "car_data_buffer": [],         # Chronological car_data records for frontend animation
     }
 
 

@@ -267,6 +267,15 @@ async def start_replay(
             len(rc_pre), len(pit_pre), len(pos_pre), len(iv_pre),
         )
 
+    # Fetch the track outline — one driver's location data for a clean lap.
+    # Uses _session_start (SESSION STARTED timestamp) as the reference point
+    # so the time window targets lap 3-4 of actual racing.
+    await asyncio.sleep(1.0)  # Respect rate limits between fetches
+    outline = await live_race.fetch_track_outline(session_key, _session_start)
+    if outline:
+        live_race._race_state["track_outline"] = outline
+    await asyncio.sleep(1.0)  # Rate limit buffer before replay loop starts
+
     # Launch the replay loop
     _replay_task = asyncio.create_task(_replay_loop(session_key, total_laps))
     _replay_task.add_done_callback(live_race._log_task_exception)
@@ -439,10 +448,10 @@ async def _replay_loop(session_key: int, total_laps: int) -> None:
         # Historical data is available on the free OpenF1 tier (sponsor tier
         # is only needed for real-time data during active sessions).
         #
-        # Use "date>" and "date<" (strict operators, matching the live polling
-        # pattern) — the "date<=" operator causes 500 errors on some endpoints.
-        # Requests are sequential with a delay to avoid rate-limit issues on
-        # the free tier (parallel requests can trigger per-second limits).
+        # car_data is applied in bulk (gauges update once per cycle).
+        # Location records are stored as a chronological buffer — the frontend
+        # animates through them at 60fps using requestAnimationFrame, giving
+        # smooth continuous movement without needing high-frequency SSE messages.
         virtual_iso = virtual_clock.isoformat()
         try:
             telemetry_params: dict[str, Any] = {
@@ -453,27 +462,46 @@ async def _replay_loop(session_key: int, total_laps: int) -> None:
 
             car_data = await live_race.fetch_openf1("/car_data", telemetry_params)
             if car_data:
+                # Apply latest values to car_data (used as fallback by non-animated components)
                 live_race._update_from_car_data(car_data)
-                logger.info(
-                    "Replay tick: lap %d, %.1f%%, car_data=%d records",
-                    live_race._race_state["current_lap"],
-                    live_race._race_state["replay_elapsed_pct"],
-                    len(car_data),
-                )
+                # Store chronological buffer for frontend 60fps animation.
+                # Filter rpm=0 records (telemetry dropouts) to avoid gauge flicker.
+                # Short keys minimize SSE payload (~60KB at 4x speed).
+                live_race._race_state["car_data_buffer"] = [
+                    {
+                        "dn": r["driver_number"], "s": r.get("speed", 0),
+                        "r": r.get("rpm", 0), "g": r.get("n_gear", 0),
+                        "t": r.get("throttle", 0), "b": r.get("brake", 0),
+                        "d": r.get("drs", 0),
+                    }
+                    for r in car_data
+                    if "driver_number" in r and r.get("rpm", 0) > 0
+                ]
             else:
-                logger.info(
-                    "Replay tick: lap %d, %.1f%%, car_data=0 (empty response)",
-                    live_race._race_state["current_lap"],
-                    live_race._race_state["replay_elapsed_pct"],
-                )
+                live_race._race_state["car_data_buffer"] = []
 
             await asyncio.sleep(0.5)  # Small gap between requests
 
             location = await live_race.fetch_openf1("/location", telemetry_params)
             if location:
+                location.sort(key=lambda r: r.get("date", ""))
                 live_race._update_from_location(location)
+                live_race._race_state["location_buffer"] = [
+                    {"dn": r["driver_number"], "x": r["x"], "y": r["y"]}
+                    for r in location
+                    if "driver_number" in r and "x" in r and "y" in r
+                ]
+            else:
+                live_race._race_state["location_buffer"] = []
 
             last_telemetry_dt = virtual_iso
+            logger.info(
+                "Replay tick: lap %d, %.1f%%, car_data=%d, location=%d",
+                live_race._race_state["current_lap"],
+                live_race._race_state["replay_elapsed_pct"],
+                len(car_data) if car_data else 0,
+                len(location) if location else 0,
+            )
         except Exception as e:
             logger.warning("Telemetry fetch failed during replay: %s", e)
 

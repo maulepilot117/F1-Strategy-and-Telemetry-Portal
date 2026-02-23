@@ -98,6 +98,34 @@ export interface StrategyRequest {
 }
 
 // ---------------------------------------------------------------------------
+// Track outline types (circuit shape from OpenF1 location data)
+// ---------------------------------------------------------------------------
+
+/** A single point on the track outline, from one driver's location data */
+export interface TrackPoint {
+  x: number;
+  y: number;
+}
+
+/** A single location record in the animation buffer (short keys to minimize SSE payload) */
+export interface LocationBufferEntry {
+  dn: number;  // driver_number
+  x: number;
+  y: number;
+}
+
+/** A single car_data record in the animation buffer (short keys to minimize SSE payload) */
+export interface CarDataBufferEntry {
+  dn: number;  // driver_number
+  s: number;   // speed (km/h)
+  r: number;   // rpm
+  g: number;   // n_gear
+  t: number;   // throttle (0-100)
+  b: number;   // brake (0 or 100)
+  d: number;   // drs code
+}
+
+// ---------------------------------------------------------------------------
 // Telemetry types (car_data + location from OpenF1)
 // ---------------------------------------------------------------------------
 
@@ -195,6 +223,12 @@ export interface LiveRaceState {
   replay_speed: number;
   /** 0-100 progress through the replay */
   replay_elapsed_pct: number;
+  /** Circuit outline points for the track map — fetched once during replay setup */
+  track_outline: TrackPoint[] | null;
+  /** Chronological location records for frontend animation (one cycle's worth) */
+  location_buffer: LocationBufferEntry[];
+  /** Chronological car_data records for frontend animation (one cycle's worth) */
+  car_data_buffer: CarDataBufferEntry[];
   /** Frontend-only fields added by the SSE hook */
   connected: boolean;
   lastUpdate: number;

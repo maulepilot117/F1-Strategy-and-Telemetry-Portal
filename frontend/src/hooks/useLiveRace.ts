@@ -41,6 +41,9 @@ const INITIAL_STATE: LiveRaceState = {
   replay_mode: false,
   replay_speed: 1,
   replay_elapsed_pct: 0,
+  track_outline: null,
+  location_buffer: [],
+  car_data_buffer: [],
   connected: false,
   lastUpdate: 0,
 };

@@ -18,6 +18,7 @@ import type {
   LiveStrategy,
   RaceControlMessage,
 } from "../../types";
+import { useAnimatedTelemetry } from "../../hooks/useAnimatedTelemetry";
 import RaceStatusBadge from "./RaceStatusBadge";
 import TeamSelector from "./TeamSelector";
 import LapDelta from "./LapDelta";
@@ -46,6 +47,15 @@ export default function ConnectedDashboard({
   headerLabel = "Live Telemetry",
 }: ConnectedDashboardProps) {
   const [logOpen, setLogOpen] = useState(false);
+
+  // Animate through the car_data + location buffers at 60fps.
+  // Returns the same Record<number, TelemetryData> shape as raceState.car_data,
+  // but with smooth interpolation between SSE snapshots instead of 4s jumps.
+  const animatedCarData = useAnimatedTelemetry(
+    raceState.car_data_buffer,
+    raceState.location_buffer,
+    raceState.car_data,
+  );
 
   // Selected team's two drivers from the live state
   const teamDrivers: LiveDriver[] = useMemo(() => {
@@ -129,7 +139,7 @@ export default function ConnectedDashboard({
             <div className="flex gap-2 mb-3">
               <DriverPanel
                 driver={teamDrivers[0]}
-                telemetry={raceState.car_data?.[teamDrivers[0].driver_number]}
+                telemetry={animatedCarData[teamDrivers[0].driver_number]}
                 telemetryAvailable={raceState.telemetry_available}
                 teamColor={teamColor}
                 strategies={driverStrategies[teamDrivers[0].driver_number] ?? []}
@@ -143,7 +153,7 @@ export default function ConnectedDashboard({
               {teamDrivers[1] && (
                 <DriverPanel
                   driver={teamDrivers[1]}
-                  telemetry={raceState.car_data?.[teamDrivers[1].driver_number]}
+                  telemetry={animatedCarData[teamDrivers[1].driver_number]}
                   telemetryAvailable={raceState.telemetry_available}
                   teamColor={teamColor}
                   strategies={driverStrategies[teamDrivers[1].driver_number] ?? []}
@@ -152,7 +162,7 @@ export default function ConnectedDashboard({
             </div>
 
             {/* Track map — shows all 20 drivers, selected team highlighted */}
-            {raceState.telemetry_available && Object.keys(raceState.car_data).length > 0 && (
+            {raceState.telemetry_available && Object.keys(animatedCarData).length > 0 && (
               <div className="bg-f1-card border border-f1-border rounded-lg overflow-hidden mb-3">
                 <div className="flex items-center justify-between px-3 py-1.5 border-b border-f1-border">
                   <span className="text-[10px] uppercase tracking-wider text-f1-muted font-f1 font-semibold">
@@ -162,8 +172,9 @@ export default function ConnectedDashboard({
                 <div className="h-52 p-2">
                   <TrackMap
                     drivers={raceState.drivers}
-                    carData={raceState.car_data}
+                    carData={animatedCarData}
                     selectedDrivers={selectedDriverNums}
+                    trackOutline={raceState.track_outline}
                   />
                 </div>
               </div>
